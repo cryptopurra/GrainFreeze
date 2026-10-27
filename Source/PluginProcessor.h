@@ -8,19 +8,6 @@
 #include "dsp/StepSequencer.h"
 #include "dsp/Reducer.h"
 
-// ---------------------------------------------------------------------------
-// GrainFreezeAudioProcessor
-//
-// Signal flow per block:
-//   1. input gain -> CaptureBuffer.writeBlock() (always)
-//   2. read host transport (ppq, bpm, playing) for sync
-//   3. evaluate the 6 StepModulators -> modulation matrix -> per-block targets
-//   4. GrainEngine.process()  + SpectralEngine.process()
-//   5. crossfade grain<->spectral by specMix
-//   6. Reducer -> filters (HP/LP) -> step gate -> output gain -> limiter
-//   7. dry/wet against the original input
-// ---------------------------------------------------------------------------
-
 class GrainFreezeAudioProcessor : public juce::AudioProcessor
 {
 public:
@@ -52,24 +39,25 @@ public:
 
     juce::AudioProcessorValueTreeState apvts;
 
-    // Exposed so the editor can draw / edit them.
-    StepSequencer& sequencer()           noexcept { return seq; }
-    StepModulator& modulator (int i)     noexcept { return mods[(size_t) i]; }
+    // --- voice sample loading (called from the editor / message thread) ---
+    bool loadSampleFile (const juce::File& file);
+    double getDetectedBpm() const noexcept { return detectedBpm.load(); }
+    double getProjectBpm()  const noexcept { return projectBpm.load(); }
+    juce::String getSampleName() const { return sampleName; }
 
-    // Current sequencer step, updated each block for the editor's playhead.
+    // Exposed for the editor.
+    StepSequencer& sequencer()       noexcept { return seq; }
+    StepModulator& modulator (int i) noexcept { return mods[(size_t) i]; }
     std::atomic<int> currentStep { -1 };
 
 private:
-    // Applies all enabled modulators to the base parameter values for this block.
-    void applyModulation (double ppqAtBlockStart);
-
-    // Resolves a destination's final value (base + modulation) into the engines.
     struct BlockTargets
     {
-        float grainSize, overlap, pitch, scanSpeed, jitter, spread;
-        float specMix, specSmear, specHold, specBlur;
-        float highpass, lowpass, robotize, reducer, volume;
+        float grainSize, overlap, pitchSemis, scanSpeed, volume, reducer;
+        float specMix, specSmear, specHold, highpass, lowpass, robotize;
     } tgt {};
+
+    void applyModulation (double ppq);
 
     CaptureBuffer  capture;
     GrainEngine    grain;
@@ -78,13 +66,16 @@ private:
     Reducer        reducerFx;
     std::array<StepModulator, pid::numEnvelopes> mods;
 
+    juce::AudioFormatManager formatManager;
+    std::atomic<double> detectedBpm { 120.0 };
+    std::atomic<double> projectBpm  { 120.0 };
+    juce::String sampleName;
+
     juce::AudioBuffer<float> grainBuf, specBuf, dryBuf;
     juce::dsp::StateVariableTPTFilter<float> hpFilter, lpFilter;
     juce::dsp::Limiter<float> limiter;
 
-    juce::SmoothedValue<float> gateSmoothed;
-    juce::SmoothedValue<float> inGainSm, outGainSm;
-
+    juce::SmoothedValue<float> gateSmoothed, inGainSm, outGainSm, voiceGainSm;
     double sampleRate = 44100.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GrainFreezeAudioProcessor)

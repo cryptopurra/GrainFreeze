@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "dsp/TempoDetector.h"
 
 using namespace juce;
 
@@ -9,6 +10,7 @@ GrainFreezeAudioProcessor::GrainFreezeAudioProcessor()
           .withOutput ("Output", AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "PARAMS", createParameterLayout())
 {
+    formatManager.registerBasicFormats();
 }
 
 bool GrainFreezeAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -42,66 +44,97 @@ void GrainFreezeAudioProcessor::prepareToPlay (double sr, int maxBlock)
     gateSmoothed.reset (sr, 0.003);
     inGainSm.reset (sr, 0.01);
     outGainSm.reset (sr, 0.01);
+    voiceGainSm.reset (sr, 0.01);
 
-    // The spectral path adds latency; report it so the host compensates.
     setLatencySamples (spectral.getLatencySamples());
+}
+
+bool GrainFreezeAudioProcessor::loadSampleFile (const File& file)
+{
+    std::unique_ptr<AudioFormatReader> reader (formatManager.createReaderFor (file));
+    if (reader == nullptr) return false;
+
+    AudioBuffer<float> tmp ((int) reader->numChannels, (int) reader->lengthInSamples);
+    reader->read (&tmp, 0, (int) reader->lengthInSamples, 0, true, true);
+    const double fileRate = reader->sampleRate;
+
+    const double bpm = TempoDetector::estimateBpm (tmp, fileRate);
+
+    // Briefly suspend the audio thread to install the resampled sample safely.
+    suspendProcessing (true);
+    capture.loadSample (tmp, fileRate);
+    suspendProcessing (false);
+
+    if (bpm > 0.0) detectedBpm.store (bpm);
+    sampleName = file.getFileName();
+    return true;
 }
 
 void GrainFreezeAudioProcessor::applyModulation (double ppq)
 {
-    // Base (unmodulated) values from the parameter tree.
     auto get = [this] (const char* id) { return apvts.getRawParameterValue (id)->load(); };
 
-    tgt.grainSize = get (pid::grainSize);
-    tgt.overlap   = get (pid::grainOverlap);
-    tgt.pitch     = get (pid::grainPitch);
-    tgt.scanSpeed = get (pid::scanSpeed);
-    tgt.jitter    = get (pid::grainJitter);
-    tgt.spread    = get (pid::grainSpread);
-    tgt.specMix   = get (pid::specMix);
-    tgt.specSmear = get (pid::specSmear);
-    tgt.specHold  = get (pid::specHold);
-    tgt.specBlur  = get (pid::specBlur);
-    tgt.highpass  = get (pid::highpass);
-    tgt.lowpass   = get (pid::lowpass);
-    tgt.robotize  = get (pid::robotize);
-    tgt.reducer   = get (pid::reducer);
-    tgt.volume    = 1.0f;
+    tgt.grainSize  = get (pid::grainSize);
+    tgt.overlap    = get (pid::grainOverlap);
+    tgt.pitchSemis = get (pid::grainPitch) / 100.0f * 24.0f;   // -100..100 -> +/-24 semis
+    tgt.scanSpeed  = get (pid::scanSpeed);
+    tgt.volume     = get (pid::volume);
+    tgt.reducer    = get (pid::reducer);
+    tgt.specMix    = get (pid::specMix);
+    tgt.specSmear  = get (pid::specSmear);
+    tgt.specHold   = get (pid::specHold);
+    tgt.highpass   = get (pid::highpass);
+    tgt.lowpass    = get (pid::lowpass);
+    tgt.robotize   = get (pid::robotize);
 
-    // Modulation matrix: each enabled modulator adds to its destination.
-    for (auto& m : mods)
+    const auto& specs = envSpecs();
+    for (int n = 0; n < pid::numEnvelopes; ++n)
     {
+        auto& m = mods[(size_t) n];
+        // sync per-block control from params
+        m.setEnabled ((bool) (get (pid::envField (n, "enable").toRawUTF8()) > 0.5f));
         if (! m.isEnabled()) continue;
-        const float v = m.evaluate (ppq);   // ~[-1,+1]
-        switch (m.destination())
+        m.setMode     ((EnvMode)  (int) get (pid::envField (n, "mode").toRawUTF8()));
+        m.setLoopMode ((LoopMode) (int) get (pid::envField (n, "loop").toRawUTF8()));
+        m.setSteps    ((int) get (pid::envField (n, "steps").toRawUTF8()));
+        const int barsIdx = (int) get (pid::envField (n, "bars").toRawUTF8());
+        const double barsVals[] = { 0.5, 1, 2, 4, 8, 16 };
+        m.setBars (barsVals[jlimit (0, 5, barsIdx)]);
+
+        const float base = m.evaluate (ppq);   // [-1,1]
+
+        for (auto d : specs[(size_t) n].dests)
         {
-            case ModDest::volume:       tgt.volume    += v;               break;
-            case ModDest::grainSize:    tgt.grainSize *= std::pow (2.0f, v); break;
-            case ModDest::grainOverlap: tgt.overlap   += v;               break;
-            case ModDest::grainPitch:   tgt.pitch     += v * 36.0f;       break;
-            case ModDest::scanSpeed:    tgt.scanSpeed += v * 2.0f;        break;
-            case ModDest::specMix:      tgt.specMix   += v;               break;
-            case ModDest::specSmear:    tgt.specSmear += v;               break;
-            case ModDest::specHold:     tgt.specHold  += v;               break;
-            case ModDest::highpass:     tgt.highpass  += v;               break;
-            case ModDest::lowpass:      tgt.lowpass   += v;               break;
-            case ModDest::robotize:     tgt.robotize  += v;               break;
-            case ModDest::reducer:      tgt.reducer   += v;               break;
-            default: break;
+            const float depth = get (pid::envDepth (n, d).toRawUTF8());
+            const float v = base * depth;
+            switch (d)
+            {
+                case ModDest::speed:     tgt.scanSpeed  += v;                     break;
+                case ModDest::pitch:     tgt.pitchSemis += v * 24.0f;             break;
+                case ModDest::volume:    tgt.volume     += v;                     break;
+                case ModDest::overlap:   tgt.overlap    += v;                     break;
+                case ModDest::grainSize: tgt.grainSize  *= std::pow (2.0f, v);    break;
+                case ModDest::specMix:   tgt.specMix    += v;                     break;
+                case ModDest::specHold:  tgt.specHold   += v;                     break;
+                case ModDest::highpass:  tgt.highpass   += v;                     break;
+                case ModDest::lowpass:   tgt.lowpass    += v;                     break;
+                case ModDest::robotize:  tgt.robotize   += v;                     break;
+                default: break;
+            }
         }
     }
 
-    // Clamp to valid ranges.
-    tgt.grainSize = jlimit (64.f, 8192.f, tgt.grainSize);
+    tgt.grainSize = jlimit (128.f, 4096.f, tgt.grainSize);
     tgt.overlap   = jlimit (0.f, 1.f, tgt.overlap);
+    tgt.scanSpeed = jlimit (0.f, 2.f, tgt.scanSpeed);
+    tgt.volume    = jlimit (0.f, 2.f, tgt.volume);
+    tgt.reducer   = jlimit (0.f, 1.f, tgt.reducer);
     tgt.specMix   = jlimit (0.f, 1.f, tgt.specMix);
     tgt.specSmear = jlimit (0.f, 1.f, tgt.specSmear);
     tgt.specHold  = jlimit (0.f, 1.f, tgt.specHold);
     tgt.highpass  = jlimit (0.f, 1.f, tgt.highpass);
     tgt.lowpass   = jlimit (0.f, 1.f, tgt.lowpass);
     tgt.robotize  = jlimit (0.f, 1.f, tgt.robotize);
-    tgt.reducer   = jlimit (0.f, 1.f, tgt.reducer);
-    tgt.volume    = jlimit (0.f, 2.f, tgt.volume);
 }
 
 void GrainFreezeAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer&)
@@ -109,46 +142,59 @@ void GrainFreezeAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBu
     ScopedNoDenormals noDenormals;
     const int n = buffer.getNumSamples();
 
-    // --- transport for musical sync ---
-    double ppq = 0.0, bpm = 120.0; bool playing = false;
+    if (apvts.getRawParameterValue (pid::bypass)->load() > 0.5f)
+        return;
+
+    double ppq = 0.0, bpm = 120.0;
     if (auto* ph = getPlayHead())
         if (auto pos = ph->getPosition())
         {
-            if (auto p = pos->getPpqPosition())    ppq = *p;
-            if (auto b = pos->getBpm())            bpm = *b;
-            playing = pos->getIsPlaying();
+            if (auto p = pos->getPpqPosition()) ppq = *p;
+            if (auto b = pos->getBpm())         bpm = *b;
         }
-    ignoreUnused (bpm, playing);
+    projectBpm.store (bpm);
 
     // --- input gain + always-on capture ---
     inGainSm.setTargetValue (Decibels::decibelsToGain (apvts.getRawParameterValue (pid::inputGain)->load()));
     dryBuf.makeCopyOf (buffer, true);
-    for (int c = 0; c < buffer.getNumChannels(); ++c)
-        buffer.applyGain (c, 0, n, inGainSm.getCurrentValue());
-
-    // Freeze / reset handling.
-    const bool freeze = apvts.getRawParameterValue (pid::freeze)->load() > 0.5f;
-    capture.setFrozen (freeze);
-    if (apvts.getRawParameterValue (pid::reset)->load() > 0.5f)
-        capture.reset();
+    buffer.applyGain (inGainSm.getCurrentValue());
     capture.writeBlock (buffer);
 
-    // --- modulation for this block ---
+    // --- voice source + time-stretch + tempo sync ---
+    const bool voiceOn = apvts.getRawParameterValue (pid::voiceEnable)->load() > 0.5f;
+    capture.setUseSample (voiceOn);
+    if (voiceOn && capture.hasSample())
+    {
+        const bool  sync  = apvts.getRawParameterValue (pid::stretchSync)->load() > 0.5f;
+        double ratio = sync ? (projectBpm.load() / jmax (1.0, detectedBpm.load()))
+                            : apvts.getRawParameterValue (pid::stretchRatio)->load();
+        ratio = jlimit (0.1, 8.0, ratio);
+        capture.advanceSamplePlayhead (ratio * (double) n);
+    }
+
+    // --- freeze / reset ---
+    capture.setFrozen (apvts.getRawParameterValue (pid::freeze)->load() > 0.5f);
+    if (apvts.getRawParameterValue (pid::reset)->load() > 0.5f)
+        capture.reset();
+
+    // --- modulation ---
     applyModulation (ppq);
 
     // --- grain engine ---
     grain.setGrainSize (tgt.grainSize);
     grain.setOverlap   (tgt.overlap);
-    grain.setPitch     (tgt.pitch);
-    grain.setScanSpeed (tgt.scanSpeed);
-    grain.setJitter    (tgt.jitter);
-    grain.setSpread    (tgt.spread);
+    grain.setPitch     (tgt.pitchSemis);
+    // In live-unfrozen voice mode the playhead supplies the time motion, so the
+    // grain scan stays near the anchor; otherwise Speed scans the window.
+    grain.setScanSpeed ((voiceOn && ! capture.isFrozen()) ? 0.0f : tgt.scanSpeed);
+    grain.setJitter    (0.0f);
+    grain.setSpread    (0.3f);
     grain.process (grainBuf, n);
 
-    // --- spectral engine (our addition) ---
+    // --- spectral engine ---
     spectral.setSmear (tgt.specSmear);
     spectral.setHold  (tgt.specHold);
-    spectral.setBlur  (tgt.specBlur);
+    spectral.setBlur  (0.0f);
     spectral.setRobotize (tgt.robotize);
     spectral.process (specBuf, n);
 
@@ -156,19 +202,19 @@ void GrainFreezeAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBu
     buffer.clear();
     for (int c = 0; c < buffer.getNumChannels(); ++c)
     {
-        auto* out = buffer.getWritePointer (c);
-        auto* g   = grainBuf.getReadPointer (jmin (c, grainBuf.getNumChannels() - 1));
-        auto* s   = specBuf.getReadPointer  (jmin (c, specBuf.getNumChannels()  - 1));
+        auto* o = buffer.getWritePointer (c);
+        auto* g = grainBuf.getReadPointer (jmin (c, grainBuf.getNumChannels() - 1));
+        auto* s = specBuf.getReadPointer  (jmin (c, specBuf.getNumChannels()  - 1));
         const float mix = tgt.specMix;
         for (int i = 0; i < n; ++i)
-            out[i] = g[i] * (1.0f - mix) + s[i] * mix;
+            o[i] = g[i] * (1.0f - mix) + s[i] * mix;
     }
 
-    // --- reducer (lo-fi) ---
+    // --- reducer ---
     reducerFx.setAmount (tgt.reducer);
     reducerFx.process (buffer, n);
 
-    // --- HP/LP filters ---
+    // --- filters ---
     hpFilter.setCutoffFrequency (jmap (tgt.highpass, 20.0f, 2000.0f));
     lpFilter.setCutoffFrequency (jmap (tgt.lowpass, 500.0f, 20000.0f));
     {
@@ -178,45 +224,33 @@ void GrainFreezeAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBu
         if (tgt.lowpass  < 0.999f) lpFilter.process (ctx);
     }
 
-    // --- step gate ---
+    // --- step gate + volume ---
     seq.setEnabled    (apvts.getRawParameterValue (pid::seqOn)->load() > 0.5f);
     seq.setLength     ((int) apvts.getRawParameterValue (pid::seqLength)->load());
     seq.setResolution ((StepSequencer::Resolution) (int) apvts.getRawParameterValue (pid::seqResolution)->load());
     seq.setOffset     (apvts.getRawParameterValue (pid::seqOffset)->load());
 
-    const double spqPpq = ppq;
     for (int i = 0; i < n; ++i)
     {
-        const double localPpq = spqPpq + (double) i * (bpm / 60.0) / sampleRate;
+        const double localPpq = ppq + (double) i * (bpm / 60.0) / sampleRate;
         gateSmoothed.setTargetValue (seq.gateAt (localPpq));
-        const float gate = gateSmoothed.getNextValue() * tgt.volume;
+        const float g = gateSmoothed.getNextValue() * tgt.volume;
         for (int c = 0; c < buffer.getNumChannels(); ++c)
-            buffer.getWritePointer (c)[i] *= gate;
+            buffer.getWritePointer (c)[i] *= g;
     }
-    // Publish the step under the last sample for the editor's playhead.
     currentStep.store (seq.isEnabled()
-        ? seq.stepIndexAt (spqPpq + (double) (n - 1) * (bpm / 60.0) / sampleRate)
+        ? seq.stepIndexAt (ppq + (double) (n - 1) * (bpm / 60.0) / sampleRate)
         : -1, std::memory_order_relaxed);
 
     // --- output gain + limiter ---
     outGainSm.setTargetValue (Decibels::decibelsToGain (apvts.getRawParameterValue (pid::outputGain)->load()));
-    for (int c = 0; c < buffer.getNumChannels(); ++c)
-        buffer.applyGain (c, 0, n, outGainSm.getCurrentValue());
+    buffer.applyGain (outGainSm.getCurrentValue());
 
+    if (apvts.getRawParameterValue (pid::limiterOn)->load() > 0.5f)
     {
         dsp::AudioBlock<float> block (buffer);
         dsp::ProcessContextReplacing<float> ctx (block);
         limiter.process (ctx);
-    }
-
-    // --- dry/wet (extra vs original) ---
-    const float wet = apvts.getRawParameterValue (pid::dryWet)->load();
-    for (int c = 0; c < buffer.getNumChannels(); ++c)
-    {
-        auto* out = buffer.getWritePointer (c);
-        auto* dry = dryBuf.getReadPointer (jmin (c, dryBuf.getNumChannels() - 1));
-        for (int i = 0; i < n; ++i)
-            out[i] = out[i] * wet + dry[i] * (1.0f - wet);
     }
 }
 
@@ -237,7 +271,6 @@ AudioProcessorEditor* GrainFreezeAudioProcessor::createEditor()
     return new GrainFreezeAudioProcessorEditor (*this);
 }
 
-// This creates new instances of the plugin.
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new GrainFreezeAudioProcessor();

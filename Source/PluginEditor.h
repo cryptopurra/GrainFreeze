@@ -1,25 +1,19 @@
 #pragma once
 #include <JuceHeader.h>
 #include "PluginProcessor.h"
+#include "gui/GFLookAndFeel.h"
 #include "gui/SequencerGrid.h"
 #include "gui/CurveEditor.h"
+#include "gui/VoicePanel.h"
 
-// ---------------------------------------------------------------------------
-// Minimal functional editor. The layout mirrors the mental model:
-//   top row   : main knobs (grain size, overlap, pitch, speed, spec mix...)
-//   centre    : big Freeze / Live toggle + source readout
-//   left panel: the 6 envelope tabs (curve editor placeholder)
-//   bottom    : the step-sequencer grid
-// Visual design is intentionally plain here; it's the working scaffold you
-// style later with the frontend-design pass.
-// ---------------------------------------------------------------------------
-
+// Resizable, percentage-zoomable editor with a TimeFreeze-style functional
+// layout (original skin, no proprietary artwork or branding).
 class GrainFreezeAudioProcessorEditor : public juce::AudioProcessorEditor,
                                         private juce::Timer
 {
 public:
     explicit GrainFreezeAudioProcessorEditor (GrainFreezeAudioProcessor&);
-    ~GrainFreezeAudioProcessorEditor() override = default;
+    ~GrainFreezeAudioProcessorEditor() override;
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -27,30 +21,63 @@ public:
 
 private:
     using APVTS = juce::AudioProcessorValueTreeState;
-    using SliderAttach = APVTS::SliderAttachment;
-    using ButtonAttach = APVTS::ButtonAttachment;
 
-    struct LabeledKnob
+    struct Knob
     {
         juce::Slider slider;
         juce::Label  label;
-        std::unique_ptr<SliderAttach> attach;
+        std::unique_ptr<APVTS::SliderAttachment> attach;
+    };
+    struct EnvControls
+    {
+        juce::ComboBox   mode, loop, bars;
+        juce::Slider     steps;
+        juce::ToggleButton enable;
+        std::unique_ptr<APVTS::ComboBoxAttachment> modeA, loopA, barsA;
+        std::unique_ptr<APVTS::SliderAttachment>   stepsA;
+        std::unique_ptr<APVTS::ButtonAttachment>   enableA;
+        juce::OwnedArray<Knob> depth;   // one per destination
     };
 
-    LabeledKnob& addKnob (const juce::String& paramID, const juce::String& text);
+    Knob& makeKnob (juce::Component& parent, const juce::String& paramID, const juce::String& text);
+    void  selectTab (int tab);
+    void  layoutCanvas();
 
     GrainFreezeAudioProcessor& proc;
+    GFLookAndFeel lnf;
 
-    juce::OwnedArray<LabeledKnob> knobs;
+    juce::Component canvas;            // fixed-size; scaled by resized()
+    static constexpr int baseW = 980, baseH = 640;
 
-    juce::ToggleButton freezeButton { "FREEZE" };
-    std::unique_ptr<ButtonAttach> freezeAttach;
+    juce::ComboBox zoomBox;
 
-    // Step gate grid + one envelope curve editor (envelope selector + tabs
-    // for all 6 come in the next pass; this wires the first envelope).
+    // tabs: 0=Seq 1=Time 2=Pitch 3..6=Misc1..4
+    juce::OwnedArray<juce::TextButton> tabs;
+    int selectedTab = 0;
+
+    // display area
     SequencerGrid seqGrid { proc.sequencer() };
-    CurveEditor    curve   { proc.modulator (0) };
-    juce::Label    seqLabel, curveLabel;
+    juce::OwnedArray<CurveEditor> curves;         // 6
+    juce::OwnedArray<EnvControls> envCtrls;       // 6
+
+    // seq controls
+    Knob seqLength, seqOffset;
+    juce::ComboBox seqRes; std::unique_ptr<APVTS::ComboBoxAttachment> seqResA;
+    juce::ToggleButton seqOn; std::unique_ptr<APVTS::ButtonAttachment> seqOnA;
+
+    // main knobs
+    juce::OwnedArray<Knob> mainKnobs;
+
+    // transport buttons
+    juce::ToggleButton freezeBtn { "FREEZE" }, bypassBtn { "Bypass" }, limiterBtn { "Limiter" };
+    juce::TextButton   resetBtn  { "Reset" };
+    std::unique_ptr<APVTS::ButtonAttachment> freezeA, bypassA, limiterA;
+
+    // voice section
+    VoicePanel voice;
+    juce::ToggleButton voiceEnable { "Voice" }, stretchSync { "Sync Tempo" };
+    std::unique_ptr<APVTS::ButtonAttachment> voiceEnableA, stretchSyncA;
+    Knob voiceGain, stretchRatio;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GrainFreezeAudioProcessorEditor)
 };

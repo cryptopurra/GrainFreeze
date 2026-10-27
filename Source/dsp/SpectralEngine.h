@@ -47,9 +47,9 @@ private:
     std::array<float, fftSize> analysisWin;
     std::array<float, fftSize> synthWin;
 
-    // Sliding input / output accumulators for overlap-add.
-    std::vector<float> inFifo, outFifo;
-    int fifoFill = 0, outReadPos = 0;
+    // Circular buffers for overlap-add.
+    std::vector<float> inRing, outRing, frame;
+    int inWrite = 0, sinceHop = 0, outRead = 0, outValid = 0;
 
     std::array<float, fftSize * 2> fftData {};     // interleaved re/im work area
     std::array<float, fftSize / 2 + 1> heldMag {}; // smoothed / held magnitudes

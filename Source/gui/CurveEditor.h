@@ -175,8 +175,8 @@ private:
     void pushToModulator() { mod.setCurve (curve); }
 
     StepModulator& mod;
-    std::vector<juce::Point<float>> curve { {0.f, 0.f}, {1.f, 1.f} };
-    EnvMode mode = EnvMode::smooth;
+    std::vector<juce::Point<float>> curve { {0.f, 0.5f}, {1.f, 0.5f} };
+    EnvMode mode = EnvMode::normal;
     int steps = 16;
     int dragIndex = -1;
 };

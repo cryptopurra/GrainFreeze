@@ -4,7 +4,6 @@ void SpectralEngine::prepare (double sampleRate, int /*maxBlock*/)
 {
     sr = sampleRate;
 
-    // Hann analysis & synthesis windows (sqrt-Hann pair -> flat overlap-add).
     for (int i = 0; i < fftSize; ++i)
     {
         const float w = 0.5f * (1.0f - std::cos (juce::MathConstants<float>::twoPi * i / (fftSize - 1)));
@@ -12,28 +11,29 @@ void SpectralEngine::prepare (double sampleRate, int /*maxBlock*/)
         synthWin[i]    = std::sqrt (w);
     }
 
-    inFifo.assign  (fftSize, 0.0f);
-    outFifo.assign (fftSize * 2, 0.0f);
+    inRing.assign (fftSize, 0.0f);
+    outRing.assign (fftSize + hop, 0.0f);
+    frame.assign (fftSize, 0.0f);
     reset();
 }
 
 void SpectralEngine::reset()
 {
-    std::fill (inFifo.begin(),  inFifo.end(),  0.0f);
-    std::fill (outFifo.begin(), outFifo.end(), 0.0f);
+    std::fill (inRing.begin(),  inRing.end(),  0.0f);
+    std::fill (outRing.begin(), outRing.end(), 0.0f);
     heldMag.fill (0.0f);
     phaseAccum.fill (0.0f);
-    fifoFill   = 0;
-    outReadPos = 0;
-    haveHeld   = false;
+    inWrite = 0; sinceHop = 0; outRead = 0; outValid = 0;
+    haveHeld = false;
 }
 
 void SpectralEngine::processFrame()
 {
-    // Window the current frame into the interleaved FFT work area.
+    // Assemble the most recent fftSize samples (oldest first) and window them.
     for (int i = 0; i < fftSize; ++i)
     {
-        fftData[(size_t) i * 2]     = inFifo[(size_t) i] * analysisWin[i];
+        const int idx = (inWrite + i) % fftSize;   // inWrite points at oldest
+        fftData[(size_t) i * 2]     = inRing[(size_t) idx] * analysisWin[i];
         fftData[(size_t) i * 2 + 1] = 0.0f;
     }
 
@@ -48,29 +48,21 @@ void SpectralEngine::processFrame()
         float mag = std::sqrt (re * re + im * im);
         float phase = std::atan2 (im, re);
 
-        // SMEAR: exponential magnitude averaging across frames.
         if (! haveHeld) heldMag[(size_t) b] = mag;
         const float sm = smear * 0.98f;
         heldMag[(size_t) b] = sm * heldMag[(size_t) b] + (1.0f - sm) * mag;
 
-        // HOLD: blend current magnitude toward the held magnitude.
         float outMag = juce::jmap (hold, mag, heldMag[(size_t) b]);
 
-        // Phase handling:
-        //  - normal: keep measured phase
-        //  - hold>0: advance phase by nominal bin frequency (vocoder freeze)
-        //  - robotize: zero phase (phase-locked, "robot" timbre)
-        float binFreq = juce::MathConstants<float>::twoPi * (float) hop * (float) b / (float) fftSize;
+        const float binFreq = juce::MathConstants<float>::twoPi * (float) hop * (float) b / (float) fftSize;
         phaseAccum[(size_t) b] += binFreq;
-        float frozenPhase = phaseAccum[(size_t) b];
-        float outPhase = juce::jmap (hold, phase, frozenPhase);
+        float outPhase = juce::jmap (hold, phase, phaseAccum[(size_t) b]);
         outPhase = juce::jmap (robotize, outPhase, 0.0f);
 
         fftData[(size_t) b * 2]     = outMag * std::cos (outPhase);
         fftData[(size_t) b * 2 + 1] = outMag * std::sin (outPhase);
     }
 
-    // BLUR: simple 3-tap bin smoothing of the complex spectrum.
     if (blur > 0.0f)
     {
         std::array<float, fftSize * 2> tmp = fftData;
@@ -87,7 +79,6 @@ void SpectralEngine::processFrame()
 
     haveHeld = true;
 
-    // Rebuild the negative-frequency half (conjugate symmetry) before inverse.
     for (int b = 1; b < fftSize / 2; ++b)
     {
         fftData[(size_t) (fftSize - b) * 2]     =  fftData[(size_t) b * 2];
@@ -97,45 +88,48 @@ void SpectralEngine::processFrame()
     fft.perform (reinterpret_cast<juce::dsp::Complex<float>*> (fftData.data()),
                  reinterpret_cast<juce::dsp::Complex<float>*> (fftData.data()), true);
 
-    // Overlap-add windowed output.
+    // Overlap-add into the output ring at the current output write position.
+    const int outWrite = (outRead + outValid) % (int) outRing.size();
     for (int i = 0; i < fftSize; ++i)
     {
-        const float s = fftData[(size_t) i * 2] * synthWin[i] / (float) fftSize;
-        outFifo[(size_t) (outReadPos + i) % outFifo.size()] += s;
+        const int idx = (outWrite + i) % (int) outRing.size();
+        outRing[(size_t) idx] += fftData[(size_t) i * 2] * synthWin[i] / (float) fftSize;
     }
+    outValid = juce::jmin ((int) outRing.size(), outValid + hop);
 }
 
 void SpectralEngine::process (juce::AudioBuffer<float>& out, int numSamples)
 {
     out.clear();
-    if (capture == nullptr) { return; }
+    if (capture == nullptr) return;
 
-    auto* dst = out.getWritePointer (0);
+    auto* dst  = out.getWritePointer (0);
     auto* dstR = out.getNumChannels() > 1 ? out.getWritePointer (1) : dst;
 
-    // Pull mono input from the capture buffer at the read anchor (spectral
-    // path is mono-summed for simplicity; stereo can be added as two FFTs).
     const double anchor = capture->getAnchor();
 
     for (int s = 0; s < numSamples; ++s)
     {
-        float x = 0.5f * (capture->readSample (0, anchor - numSamples + s)
-                        + capture->readSample (1, anchor - numSamples + s));
+        const float x = 0.5f * (capture->readSample (0, anchor - numSamples + s)
+                              + capture->readSample (1, anchor - numSamples + s));
 
-        inFifo.erase (inFifo.begin());
-        inFifo.push_back (x);
+        inRing[(size_t) inWrite] = x;
+        inWrite = (inWrite + 1) % fftSize;
 
-        if (++fifoFill >= hop)
+        if (++sinceHop >= hop)
         {
-            fifoFill = 0;
+            sinceHop = 0;
             processFrame();
-            outReadPos = (outReadPos + hop) % (int) outFifo.size();
         }
 
-        const int rp = (outReadPos + s) % (int) outFifo.size();
-        float y = outFifo[(size_t) rp];
-        outFifo[(size_t) rp] = 0.0f;  // consume
-
+        float y = 0.0f;
+        if (outValid > 0)
+        {
+            y = outRing[(size_t) outRead];
+            outRing[(size_t) outRead] = 0.0f;
+            outRead = (outRead + 1) % (int) outRing.size();
+            --outValid;
+        }
         dst[s]  = y;
         dstR[s] = y;
     }
