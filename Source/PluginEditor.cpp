@@ -90,8 +90,11 @@ GrainFreezeAudioProcessorEditor::GrainFreezeAudioProcessorEditor (GrainFreezeAud
         ec->stepsA = std::make_unique<APVTS::SliderAttachment> (proc.apvts, pid::envField (n, "steps"), ec->steps);
         ec->enable.setButtonText ("Enable");
         ec->enableA = std::make_unique<APVTS::ButtonAttachment> (proc.apvts, pid::envField (n, "enable"), ec->enable);
-        for (auto* c : { (Component*) &ec->mode, &ec->loop, &ec->bars, &ec->steps, &ec->enable })
-            canvas.addChildComponent (c);
+        canvas.addChildComponent (ec->mode);
+        canvas.addChildComponent (ec->loop);
+        canvas.addChildComponent (ec->bars);
+        canvas.addChildComponent (ec->steps);
+        canvas.addChildComponent (ec->enable);
 
         // keep mode combo driving the curve editor's draw style
         ec->mode.onChange = [this, n, ec]
