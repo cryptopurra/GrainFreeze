@@ -19,18 +19,16 @@ float StepModulator::sampleStep (float phase01) const noexcept
     return sampleSmooth ((step + 0.5f) / (float) numSteps);
 }
 
-float StepModulator::evaluate (double ppqPosition) const noexcept
+float StepModulator::evaluate01 (double ppqPosition) const noexcept
 {
-    if (! enabled) return 0.0f;
-
     const double quartersPerCycle = bars * 4.0;
-    double raw = ppqPosition / quartersPerCycle;
+    const double raw = ppqPosition / quartersPerCycle;
     double cyclePhase = raw - std::floor (raw);
 
     switch (loopMode)
     {
         case LoopMode::oneShot:
-            if (raw >= 1.0) cyclePhase = 1.0;
+            if (raw >= 1.0 || raw < 0.0) cyclePhase = (raw < 0.0) ? 0.0 : 1.0;
             break;
         case LoopMode::pingPong:
         {
@@ -41,8 +39,19 @@ float StepModulator::evaluate (double ppqPosition) const noexcept
         case LoopMode::loop:
         default: break;
     }
+    lastPhase.store ((float) cyclePhase, std::memory_order_relaxed);
 
-    const float v = (mode == EnvMode::step) ? sampleStep ((float) cyclePhase)
-                                            : sampleSmooth ((float) cyclePhase);
-    return v * 2.0f - 1.0f;   // 0..1 curve -> -1..+1
+    juce::SpinLock::ScopedTryLockType tl (lock);
+    if (! tl.isLocked())
+        return lastValue;                    // UI is editing the curve: hold the last value
+
+    lastValue = (mode == EnvMode::step) ? sampleStep ((float) cyclePhase)
+                                        : sampleSmooth ((float) cyclePhase);
+    return lastValue;
+}
+
+float StepModulator::evaluate (double ppqPosition) const noexcept
+{
+    if (! enabled) return 0.0f;
+    return evaluate01 (ppqPosition) * 2.0f - 1.0f;   // 0..1 curve -> -1..+1
 }

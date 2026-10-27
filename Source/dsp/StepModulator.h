@@ -22,16 +22,31 @@ public:
 
     bool isEnabled() const noexcept { return enabled; }
 
-    void setCurve (const std::vector<juce::Point<float>>& pts) { curve = pts; }
-    const std::vector<juce::Point<float>>& getCurve() const { return curve; }
+    void setCurve (const std::vector<juce::Point<float>>& pts)
+    {
+        const juce::SpinLock::ScopedLockType sl (lock);
+        curve = pts;
+    }
+    std::vector<juce::Point<float>> getCurve() const
+    {
+        const juce::SpinLock::ScopedLockType sl (lock);
+        return curve;
+    }
 
     // Bipolar value in [-1,1] at an absolute musical position (quarter notes).
     float evaluate (double ppqPosition) const noexcept;
+    // Unipolar curve value 0..1 (used for absolute targets such as Speed).
+    float evaluate01 (double ppqPosition) const noexcept;
+    // Current position inside the cycle (0..1), for the UI playhead.
+    float getPhase() const noexcept { return lastPhase.load (std::memory_order_relaxed); }
 
 private:
     float sampleSmooth (float phase01) const noexcept;
     float sampleStep   (float phase01) const noexcept;
 
+    mutable juce::SpinLock lock;
+    mutable std::atomic<float> lastPhase { 0.0f };
+    mutable float lastValue = 0.5f;
     std::vector<juce::Point<float>> curve { {0.f, 0.5f}, {1.f, 0.5f} };
     EnvMode  mode     = EnvMode::normal;
     LoopMode loopMode = LoopMode::loop;

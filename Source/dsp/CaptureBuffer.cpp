@@ -72,6 +72,13 @@ void CaptureBuffer::advanceSamplePlayhead (double delta) noexcept
     }
 }
 
+void CaptureBuffer::setSamplePlayhead (double pos) noexcept
+{
+    if (! usingSample() || frozen || sampleLength <= 0) return;
+    samplePlayhead = std::fmod (pos, (double) sampleLength);
+    if (samplePlayhead < 0.0) samplePlayhead += sampleLength;
+}
+
 void CaptureBuffer::setFrozen (bool shouldFreeze) noexcept
 {
     if (shouldFreeze && ! frozen)

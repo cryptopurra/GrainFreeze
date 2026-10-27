@@ -20,6 +20,7 @@ class GrainEngine
 public:
     void prepare (double sampleRate, int maxBlock);
     void reset();
+    void restartScan() noexcept { scanPhase = 0.0; }
 
     void setCaptureBuffer (CaptureBuffer* cb) noexcept { capture = cb; }
 
@@ -30,6 +31,8 @@ public:
     void setScanSpeed   (float v)       noexcept { scanSpeed = v; }
     void setJitter      (float v)       noexcept { jitter = juce::jlimit (0.f, 1.f, v); }
     void setSpread      (float v)       noexcept { spread = juce::jlimit (0.f, 1.f, v); }
+    // How fast the live anchor moves per output sample (1 = live input, ratio = voice).
+    void setAnchorRate  (double r)      noexcept { anchorRate = r; }
 
     // Renders the grain cloud into out (replacing its contents).
     void process (juce::AudioBuffer<float>& out, int numSamples);
@@ -61,6 +64,8 @@ private:
     float  scanSpeed = 1.0f;
     float  jitter = 0.0f, spread = 0.3f;
 
+    double anchorRate = 1.0;
+    double curAnchor  = 0.0;
     double scanPhase = 0.0;     // advances the cloud's read origin
     double spawnCounter = 0.0;  // fractional grain-scheduler accumulator
 

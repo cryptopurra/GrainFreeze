@@ -40,6 +40,9 @@ public:
     // Advance the sample playhead by `delta` samples (stretch * blockSize),
     // called once per block by the processor. Wraps over the sample length.
     void advanceSamplePlayhead (double delta) noexcept;
+    // Sets the playhead absolutely (tempo-locked sync); wraps over the sample length.
+    void setSamplePlayhead (double pos) noexcept;
+    double getSamplePlayhead() const noexcept { return samplePlayhead; }
 
     // --- freeze (applies to whichever source is active) ---
     void setFrozen (bool shouldFreeze) noexcept;

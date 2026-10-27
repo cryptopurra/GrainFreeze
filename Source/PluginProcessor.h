@@ -45,6 +45,24 @@ public:
     double getProjectBpm()  const noexcept { return projectBpm.load(); }
     juce::String getSampleName() const { return sampleName; }
 
+    // Voice waveform for the editor (min/max pairs); version bumps when a new sample loads.
+    int  getSampleVersion() const noexcept { return sampleVersion.load(); }
+    std::vector<float> getPeaks (double& durationSeconds) const
+    {
+        const juce::ScopedLock sl (peakLock);
+        durationSeconds = sampleDuration;
+        return peaks;
+    }
+
+    std::atomic<int> curvesRevision { 0 };
+    void requestReset() noexcept { resetRequested.store (true); }
+
+    // Light-weight UI feedback, written by the audio thread.
+    std::atomic<float>  inLevel[2] { { 0.0f }, { 0.0f } }, outLevel[2] { { 0.0f }, { 0.0f } };
+    std::atomic<float>  samplePlayNorm { -1.0f };
+    std::atomic<double> freezeSeconds { 0.0 };
+    std::atomic<bool>   frozenUI { false };
+
     // Exposed for the editor.
     StepSequencer& sequencer()       noexcept { return seq; }
     StepModulator& modulator (int i) noexcept { return mods[(size_t) i]; }
@@ -75,7 +93,16 @@ private:
     juce::dsp::StateVariableTPTFilter<float> hpFilter, lpFilter;
     juce::dsp::Limiter<float> limiter;
 
-    juce::SmoothedValue<float> gateSmoothed, inGainSm, outGainSm, voiceGainSm;
+    juce::SmoothedValue<float> gateSmoothed, wetSm;
+    float lastInGain = 1.0f, lastOutGain = 1.0f, lastVoiceGain = 1.0f;
+    bool  wasSpecOn = false;
+    std::atomic<bool> resetRequested { false };
+    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> dryDelay { 16384 };
+
+    mutable juce::CriticalSection peakLock;
+    std::vector<float> peaks;
+    double sampleDuration = 0.0;
+    std::atomic<int> sampleVersion { 0 };
     double sampleRate = 44100.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GrainFreezeAudioProcessor)

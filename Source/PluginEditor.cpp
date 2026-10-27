@@ -2,30 +2,67 @@
 
 using namespace juce;
 
-GrainFreezeAudioProcessorEditor::Knob&
-GrainFreezeAudioProcessorEditor::makeKnob (Component& parent, const String& paramID, const String& text)
+//==============================================================================
+GrainFreezeAudioProcessorEditor::Knob*
+GrainFreezeAudioProcessorEditor::makeKnob (Component& parent, const String& paramID, const String& text,
+                                           bool big, int textBox)
 {
     auto* k = new Knob();
     k->slider.setSliderStyle (Slider::RotaryHorizontalVerticalDrag);
-    k->slider.setTextBoxStyle (Slider::TextBoxBelow, false, 60, 14);
+    if (textBox == 0) k->slider.setTextBoxStyle (Slider::NoTextBox, false, 0, 0);
+    else              k->slider.setTextBoxStyle (Slider::TextBoxRight, false, 58, 16);
+    k->slider.getProperties().set ("big", big);
     k->slider.setLookAndFeel (&lnf);
+    k->slider.setRotaryParameters (MathConstants<float>::pi * 1.2f, MathConstants<float>::pi * 2.8f, true);
     parent.addAndMakeVisible (k->slider);
     k->label.setText (text, dontSendNotification);
     k->label.setJustificationType (Justification::centred);
     parent.addAndMakeVisible (k->label);
     k->attach = std::make_unique<APVTS::SliderAttachment> (proc.apvts, paramID, k->slider);
-    mainKnobs.add (k);   // ownership sink; group pointers tracked separately where needed
-    return *k;
+    return k;
 }
 
+Label* GrainFreezeAudioProcessorEditor::makeCaption (const String& text, Justification j)
+{
+    auto* l = new Label();
+    l->setText (text, dontSendNotification);
+    l->setJustificationType (j);
+    l->setInterceptsMouseClicks (false, false);
+    l->setFont (Font (FontOptions (11.0f)));
+    canvas.addAndMakeVisible (l);
+    captions.add (l);
+    return l;
+}
+
+GrainFreezeAudioProcessorEditor::Param*
+GrainFreezeAudioProcessorEditor::makeParam (const char* id, const String& caption, bool wantKnob, bool wantBox)
+{
+    auto* p = new Param();
+    if (wantKnob) p->knob.reset (makeKnob (canvas, id, "", false, 0));
+    if (p->knob != nullptr) p->knob->label.setVisible (false);
+    if (wantBox)
+    {
+        p->box = std::make_unique<ValueBox> (P (id));
+        canvas.addAndMakeVisible (*p->box);
+    }
+    p->caption.setText (caption, dontSendNotification);
+    p->caption.setJustificationType (Justification::centred);
+    p->caption.setFont (Font (FontOptions (11.0f)));
+    p->caption.setInterceptsMouseClicks (false, false);
+    canvas.addAndMakeVisible (p->caption);
+    params.add (p);
+    return p;
+}
+
+//==============================================================================
 GrainFreezeAudioProcessorEditor::GrainFreezeAudioProcessorEditor (GrainFreezeAudioProcessor& p)
     : AudioProcessorEditor (p), proc (p)
 {
     setLookAndFeel (&lnf);
     addAndMakeVisible (canvas);
 
-    // ---- zoom ----
-    addAndMakeVisible (zoomBox);
+    // ---- top bar ----
+    canvas.addAndMakeVisible (zoomBox);
     zoomBox.addItemList ({ "50%", "75%", "100%", "125%", "150%", "200%" }, 1);
     zoomBox.setSelectedId (3, dontSendNotification);
     zoomBox.onChange = [this]
@@ -35,112 +72,150 @@ GrainFreezeAudioProcessorEditor::GrainFreezeAudioProcessorEditor (GrainFreezeAud
         setSize (baseW * z / 100, baseH * z / 100);
     };
 
-    // ---- tabs ----
+    liveBtn.setComponentID ("live");
+    canvas.addAndMakeVisible (liveBtn);
+    liveBtn.setTooltip ("Effect on live playback (when Freeze is off)");
+    liveA = std::make_unique<APVTS::ButtonAttachment> (proc.apvts, pid::live, liveBtn);
+    canvas.addAndMakeVisible (bypassBtn);
+    bypassA = std::make_unique<APVTS::ButtonAttachment> (proc.apvts, pid::bypass, bypassBtn);
+    canvas.addAndMakeVisible (limiterBtn);
+    limiterA = std::make_unique<APVTS::ButtonAttachment> (proc.apvts, pid::limiterOn, limiterBtn);
+
+    // ---- tabs + LEDs ----
     const char* tabNames[] = { "Seq", "Time", "Pitch", "Misc 1", "Misc 2", "Misc 3", "Misc 4" };
     for (int i = 0; i < 7; ++i)
     {
         auto* b = new TextButton (tabNames[i]);
         b->setClickingTogglesState (true);
         b->setRadioGroupId (100);
-        b->setColour (TextButton::buttonOnColourId, Colour (0xff3b4250));
         b->onClick = [this, i] { selectTab (i); };
         canvas.addAndMakeVisible (b);
         tabs.add (b);
     }
+    for (int i = 0; i < 7; ++i)
+    {
+        auto* led = new ToggleButton();
+        led->setComponentID ("led");
+        canvas.addAndMakeVisible (led);
+        tabLeds.add (led);
+        const String id = (i == 0) ? String (pid::seqOn) : pid::envField (i - 1, "enable");
+        tabLedAtt.add (new APVTS::ButtonAttachment (proc.apvts, id, *led));
+    }
 
-    // ---- sequencer display + controls ----
+    // ---- sequencer page ----
     canvas.addChildComponent (seqGrid);
-    seqLength.slider.setSliderStyle (Slider::RotaryHorizontalVerticalDrag);
-    seqLength.slider.setTextBoxStyle (Slider::TextBoxBelow, false, 50, 14);
-    // seq length/offset/res/on use their own attachments
-    seqLength.attach = std::make_unique<APVTS::SliderAttachment> (proc.apvts, pid::seqLength, seqLength.slider);
-    seqLength.label.setText ("Length", dontSendNotification); seqLength.label.setJustificationType (Justification::centred);
-    canvas.addChildComponent (seqLength.slider); canvas.addChildComponent (seqLength.label);
+    seqRes = std::make_unique<CycleButton> (P (pid::seqResolution), resolutionNames());
+    seqLength = std::make_unique<ValueBox> (P (pid::seqLength));
+    seqOffset = std::make_unique<ValueBox> (P (pid::seqOffset));
+    canvas.addChildComponent (*seqRes);
+    canvas.addChildComponent (*seqLength);
+    canvas.addChildComponent (*seqOffset);
+    for (auto* l : { &seqLengthLbl, &seqOffsetLbl })
+    {
+        l->setJustificationType (Justification::centred);
+        l->setFont (Font (FontOptions (11.0f)));
+        canvas.addChildComponent (l);
+    }
+    seqLengthLbl.setText ("Length", dontSendNotification);
+    seqOffsetLbl.setText ("Offset", dontSendNotification);
 
-    seqOffset.slider.setSliderStyle (Slider::RotaryHorizontalVerticalDrag);
-    seqOffset.slider.setTextBoxStyle (Slider::TextBoxBelow, false, 50, 14);
-    seqOffset.attach = std::make_unique<APVTS::SliderAttachment> (proc.apvts, pid::seqOffset, seqOffset.slider);
-    seqOffset.label.setText ("Offset", dontSendNotification); seqOffset.label.setJustificationType (Justification::centred);
-    canvas.addChildComponent (seqOffset.slider); canvas.addChildComponent (seqOffset.label);
-
-    seqRes.addItemList (resolutionNames(), 1);
-    seqResA = std::make_unique<APVTS::ComboBoxAttachment> (proc.apvts, pid::seqResolution, seqRes);
-    canvas.addChildComponent (seqRes);
-    seqOn.setButtonText ("On");
-    seqOnA = std::make_unique<APVTS::ButtonAttachment> (proc.apvts, pid::seqOn, seqOn);
-    canvas.addChildComponent (seqOn);
-
-    // ---- envelopes: curve editors + per-tab controls + depth knobs ----
+    // ---- envelope pages ----
     const auto& specs = envSpecs();
+    const double barVals[] = { 0.5, 1.0, 2.0, 4.0, 8.0, 16.0 };
     for (int n = 0; n < pid::numEnvelopes; ++n)
     {
-        auto* ce = new CurveEditor (proc.modulator (n));
-        canvas.addChildComponent (ce);
-        curves.add (ce);
+        auto* ui = new EnvUI();
+        envUI.add (ui);
 
-        auto* ec = new EnvControls();
-        ec->mode.addItemList ({ "Normal", "Step" }, 1);
-        ec->loop.addItemList ({ "One-Shot", "Loop", "Ping-Pong" }, 1);
-        ec->bars.addItemList (barsNames(), 1);
-        ec->modeA = std::make_unique<APVTS::ComboBoxAttachment> (proc.apvts, pid::envField (n, "mode"), ec->mode);
-        ec->loopA = std::make_unique<APVTS::ComboBoxAttachment> (proc.apvts, pid::envField (n, "loop"), ec->loop);
-        ec->barsA = std::make_unique<APVTS::ComboBoxAttachment> (proc.apvts, pid::envField (n, "bars"), ec->bars);
-        ec->steps.setSliderStyle (Slider::RotaryHorizontalVerticalDrag);
-        ec->steps.setTextBoxStyle (Slider::TextBoxBelow, false, 46, 14);
-        ec->stepsA = std::make_unique<APVTS::SliderAttachment> (proc.apvts, pid::envField (n, "steps"), ec->steps);
-        ec->enable.setButtonText ("Enable");
-        ec->enableA = std::make_unique<APVTS::ButtonAttachment> (proc.apvts, pid::envField (n, "enable"), ec->enable);
-        canvas.addChildComponent (ec->mode);
-        canvas.addChildComponent (ec->loop);
-        canvas.addChildComponent (ec->bars);
-        canvas.addChildComponent (ec->steps);
-        canvas.addChildComponent (ec->enable);
+        ui->curve = std::make_unique<CurveEditor> (proc.modulator (n));
+        ui->curve->setBipolar (n != 0);
+        canvas.addChildComponent (*ui->curve);
 
-        // keep mode combo driving the curve editor's draw style
-        ec->mode.onChange = [this, n, ec]
-        { curves[n]->setMode ((EnvMode) jmax (0, ec->mode.getSelectedId() - 1)); };
+        ui->steps = std::make_unique<ValueBox> (P (pid::envField (n, "steps")));
+        canvas.addChildComponent (*ui->steps);
+        ui->stepsLabel.setText ("Steps", dontSendNotification);
+        ui->stepsLabel.setJustificationType (Justification::centred);
+        ui->stepsLabel.setFont (Font (FontOptions (11.0f)));
+        canvas.addChildComponent (ui->stepsLabel);
+        ui->stepsAtt = std::make_unique<ParameterAttachment> (P (pid::envField (n, "steps")),
+            [c = ui->curve.get()] (float v) { c->setStepCount ((int) std::lround (v)); });
+        ui->stepsAtt->sendInitialUpdate();
+
+        ui->mode = std::make_unique<CycleButton> (P (pid::envField (n, "mode")), StringArray { "Normal", "Step" });
+        ui->mode->onChanged = [this, n, ui] (int i)
+        {
+            ui->curve->setMode (i == 1 ? EnvMode::step : EnvMode::normal);
+            const bool vis = (selectedTab == n + 1) && i == 1;
+            ui->steps->setVisible (vis);
+            ui->stepsLabel.setVisible (vis);
+        };
+        ui->bars = std::make_unique<CycleButton> (P (pid::envField (n, "bars")), barsNames().isEmpty() ? StringArray() : [&]
+        {
+            StringArray a;
+            for (auto& b : barsNames()) a.add (b + (b == "1/2" || b == "1" ? " Bar" : " Bars"));
+            return a;
+        }());
+        ui->bars->onChanged = [ui, barVals] (int i) { ui->curve->setBars (barVals[jlimit (0, 5, i)]); };
+        ui->mode->onChanged (ui->mode->getIndex());
+        ui->bars->onChanged (ui->bars->getIndex());
+        canvas.addChildComponent (*ui->mode);
+        canvas.addChildComponent (*ui->bars);
+
+        // Loop / Ping Pong are two toggles over one 3-state parameter.
+        ui->loopAtt = std::make_unique<ParameterAttachment> (P (pid::envField (n, "loop")),
+            [ui] (float v)
+            {
+                ui->loopIndex = (int) std::lround (v);
+                ui->loopBtn.setToggleState (ui->loopIndex >= 1, dontSendNotification);
+                ui->pingBtn.setToggleState (ui->loopIndex == 2, dontSendNotification);
+            });
+        ui->loopAtt->sendInitialUpdate();
+        ui->loopBtn.onClick = [ui] { ui->loopAtt->setValueAsCompleteGesture (ui->loopIndex >= 1 ? 0.0f : 1.0f); };
+        ui->pingBtn.onClick = [ui] { ui->loopAtt->setValueAsCompleteGesture (ui->loopIndex == 2 ? 1.0f : 2.0f); };
+        canvas.addChildComponent (ui->loopBtn);
+        canvas.addChildComponent (ui->pingBtn);
 
         for (auto d : specs[(size_t) n].dests)
         {
-            auto* k = new Knob();
-            k->slider.setSliderStyle (Slider::RotaryHorizontalVerticalDrag);
-            k->slider.setTextBoxStyle (Slider::TextBoxBelow, false, 54, 14);
-            k->slider.setLookAndFeel (&lnf);
-            k->label.setText (modDestLabel (d), dontSendNotification);
-            k->label.setJustificationType (Justification::centred);
-            k->attach = std::make_unique<APVTS::SliderAttachment> (proc.apvts, pid::envDepth (n, d), k->slider);
-            canvas.addChildComponent (k->slider);
-            canvas.addChildComponent (k->label);
-            ec->depth.add (k);
+            auto* k = makeKnob (canvas, pid::envDepth (n, d), modDestLabel (d), false, 1);
+            k->slider.setVisible (false);
+            k->label.setVisible (false);
+            ui->depth.add (k);
         }
-        envCtrls.add (ec);
     }
 
-    // ---- main knobs ----
-    struct MK { const char* id; const char* lbl; };
-    const MK mk[] = {
-        { pid::grainOverlap, "Overlap" }, { pid::grainSize, "Grain Size" },
-        { pid::specMix, "Spec Mix" },     { pid::specSmear, "Smear" },
-        { pid::scanSpeed, "Speed" },      { pid::volume, "Volume" },
-        { pid::grainPitch, "Pitch" },     { pid::reducer, "Reducer" },
-        { pid::inputGain, "Input" },      { pid::outputGain, "Output" }
-    };
-    for (auto& m : mk) makeKnob (canvas, m.id, m.lbl);
+    // ---- main knob clusters ----
+    pOverlap = makeParam (pid::grainOverlap, "Overlap",      true,  false);
+    pGrain   = makeParam (pid::grainSize,    "Grain Size",   false, true);
+    pSpeed   = makeParam (pid::scanSpeed,    "Speed",        true,  true);
+    pPitch   = makeParam (pid::grainPitch,   "Pitch",        true,  true);
+    pSpecMix = makeParam (pid::specMix,      "Spectral Mix", false, true);
+    pSmear   = makeParam (pid::specSmear,    "Smear",        true,  false);
+    pVolume  = makeParam (pid::volume,       "Volume",       true,  true);
+    pReducer = makeParam (pid::reducer,      "Reducer",      true,  true);
+
+    // ---- gain strips ----
+    inKnob.reset (makeKnob (canvas, pid::inputGain, "", true, 0));
+    outKnob.reset (makeKnob (canvas, pid::outputGain, "", true, 0));
+    inKnob->label.setVisible (false);
+    outKnob->label.setVisible (false);
+    inBox  = std::make_unique<ValueBox> (P (pid::inputGain));
+    outBox = std::make_unique<ValueBox> (P (pid::outputGain));
+    canvas.addAndMakeVisible (*inBox);
+    canvas.addAndMakeVisible (*outBox);
+    canvas.addAndMakeVisible (meterIn);
+    canvas.addAndMakeVisible (meterOut);
+    makeCaption ("Input Gain");
+    makeCaption ("Output Gain");
 
     // ---- transport ----
+    freezeBtn.setComponentID ("freeze");
     freezeBtn.setClickingTogglesState (true);
     canvas.addAndMakeVisible (freezeBtn);
     freezeA = std::make_unique<APVTS::ButtonAttachment> (proc.apvts, pid::freeze, freezeBtn);
     canvas.addAndMakeVisible (resetBtn);
-    resetBtn.onClick = [this]
-    {
-        if (auto* pr = proc.apvts.getParameter (pid::reset))
-        { pr->setValueNotifyingHost (1.0f); pr->setValueNotifyingHost (0.0f); }
-    };
-    canvas.addAndMakeVisible (bypassBtn);
-    bypassA = std::make_unique<APVTS::ButtonAttachment> (proc.apvts, pid::bypass, bypassBtn);
-    canvas.addAndMakeVisible (limiterBtn);
-    limiterA = std::make_unique<APVTS::ButtonAttachment> (proc.apvts, pid::limiterOn, limiterBtn);
+    resetBtn.onClick = [this] { proc.requestReset(); };
+    canvas.addAndMakeVisible (ledTime);
 
     // ---- voice ----
     canvas.addAndMakeVisible (voice);
@@ -148,27 +223,32 @@ GrainFreezeAudioProcessorEditor::GrainFreezeAudioProcessorEditor (GrainFreezeAud
     {
         if (! proc.loadSampleFile (f))
             NativeMessageBox::showMessageBoxAsync (MessageBoxIconType::WarningIcon,
-                "GrainFreeze", "Could not load this audio file.");
+                                                   "GrainFreeze", "Could not load this audio file.");
+        else
+            if (auto* pr = proc.apvts.getParameter (pid::voiceEnable))
+                pr->setValueNotifyingHost (1.0f);       // use the voice right away
     };
     canvas.addAndMakeVisible (voiceEnable);
     voiceEnableA = std::make_unique<APVTS::ButtonAttachment> (proc.apvts, pid::voiceEnable, voiceEnable);
     canvas.addAndMakeVisible (stretchSync);
     stretchSyncA = std::make_unique<APVTS::ButtonAttachment> (proc.apvts, pid::stretchSync, stretchSync);
-    voiceGain.slider.setSliderStyle (Slider::RotaryHorizontalVerticalDrag);
-    voiceGain.slider.setTextBoxStyle (Slider::TextBoxBelow, false, 54, 14);
-    voiceGain.slider.setLookAndFeel (&lnf);
-    voiceGain.attach = std::make_unique<APVTS::SliderAttachment> (proc.apvts, pid::voiceGain, voiceGain.slider);
-    voiceGain.label.setText ("Voice Gain", dontSendNotification); voiceGain.label.setJustificationType (Justification::centred);
-    canvas.addAndMakeVisible (voiceGain.slider); canvas.addAndMakeVisible (voiceGain.label);
-    stretchRatio.slider.setSliderStyle (Slider::RotaryHorizontalVerticalDrag);
-    stretchRatio.slider.setTextBoxStyle (Slider::TextBoxBelow, false, 54, 14);
-    stretchRatio.slider.setLookAndFeel (&lnf);
-    stretchRatio.attach = std::make_unique<APVTS::SliderAttachment> (proc.apvts, pid::stretchRatio, stretchRatio.slider);
-    stretchRatio.label.setText ("Stretch", dontSendNotification); stretchRatio.label.setJustificationType (Justification::centred);
-    canvas.addAndMakeVisible (stretchRatio.slider); canvas.addAndMakeVisible (stretchRatio.label);
+    canvas.addAndMakeVisible (loadBtn);
+    loadBtn.onClick = [this] { voice.browse(); };
+    voiceGainBox = std::make_unique<ValueBox> (P (pid::voiceGain));
+    stretchBox   = std::make_unique<ValueBox> (P (pid::stretchRatio));
+    canvas.addAndMakeVisible (*voiceGainBox);
+    canvas.addAndMakeVisible (*stretchBox);
+    for (auto* l : { &voiceGainLbl, &stretchLbl })
+    {
+        l->setFont (Font (FontOptions (11.0f)));
+        l->setJustificationType (Justification::centredRight);
+        canvas.addAndMakeVisible (l);
+    }
+    voiceGainLbl.setText ("Gain", dontSendNotification);
+    stretchLbl.setText ("Stretch", dontSendNotification);
 
-    tabs[0]->setToggleState (true, dontSendNotification);
-    selectTab (0);
+    tabs[1]->setToggleState (true, dontSendNotification);
+    selectTab (1);
 
     setResizable (true, true);
     if (auto* c = getConstrainer())
@@ -177,149 +257,226 @@ GrainFreezeAudioProcessorEditor::GrainFreezeAudioProcessorEditor (GrainFreezeAud
         setResizeLimits (baseW / 2, baseH / 2, baseW * 2, baseH * 2);
     }
     setSize (baseW, baseH);
+    lastCurvesRevision = proc.curvesRevision.load();
     startTimerHz (30);
 }
 
 GrainFreezeAudioProcessorEditor::~GrainFreezeAudioProcessorEditor()
 {
+    stopTimer();
+    for (auto* ui : envUI)
+        for (auto* k : ui->depth) k->slider.setLookAndFeel (nullptr);
+    for (auto* p : params) if (p->knob != nullptr) p->knob->slider.setLookAndFeel (nullptr);
+    inKnob->slider.setLookAndFeel (nullptr);
+    outKnob->slider.setLookAndFeel (nullptr);
     setLookAndFeel (nullptr);
 }
 
+//==============================================================================
 void GrainFreezeAudioProcessorEditor::paint (Graphics& g)
 {
-    g.fillAll (Colour (0xff17191e));
-    // Scaled panels behind the canvas content.
-    const float s = (float) getWidth() / (float) baseW;
-    g.addTransform (AffineTransform::scale (s));
-    g.setColour (Colour (0xff1f232b));
-    g.fillRoundedRectangle (14.f, 42.f, baseW - 28.f, 234.f, 8.f);   // display
-    g.setColour (Colour (0xffe8edf5).withAlpha (0.9f));
-    g.setFont (16.0f);
-    g.drawText ("GrainFreeze", 16, 8, 240, 24, Justification::left);
+    g.fillAll (Colour (0xff0e0f11));
+    g.addTransform (AffineTransform::scale ((float) getWidth() / (float) baseW));
+
+    // top bar
+    ColourGradient top (Colour (0xff25282e), 0, 0, Colour (0xff17181c), 0, 44, false);
+    g.setGradientFill (top);
+    g.fillRect (0, 0, baseW, 44);
+    g.setColour (Colour (0xff3a3f4a));
+    g.drawHorizontalLine (43, 0, (float) baseW);
+    g.setColour (Colour (0xffe9edf4));
+    g.setFont (Font (FontOptions (22.0f, Font::bold)));
+    g.drawText ("GRAINFREEZE", 16, 6, 220, 30, Justification::centredLeft);
+    g.setColour (gf::gold());
+    g.setFont (Font (FontOptions (10.5f)));
+    g.drawText ("TIME-FREEZE  GRANULAR  +  STFT", 18, 28, 220, 12, Justification::centredLeft);
+
+    // main body
+    ColourGradient body (Colour (0xff2b2e35), 0, 48, Colour (0xff1b1d22), 0, 476, false);
+    g.setGradientFill (body);
+    g.fillRoundedRectangle (8.0f, 48.0f, baseW - 16.0f, 426.0f, 12.0f);
+    g.setColour (Colour (0xff3d424d));
+    g.drawRoundedRectangle (8.5f, 48.5f, baseW - 17.0f, 425.0f, 12.0f, 1.2f);
+
+    // display housing
+    g.setColour (Colour (0xff0f1013));
+    g.fillRoundedRectangle (106.0f, 52.0f, 508.0f, 240.0f, 8.0f);
+    g.setColour (Colour (0xff4a505c));
+    g.drawRoundedRectangle (106.5f, 52.5f, 507.0f, 239.0f, 8.0f, 1.5f);
+
+    // voice section
+    g.setColour (Colour (0xff17191d));
+    g.fillRoundedRectangle (8.0f, 480.0f, baseW - 16.0f, 236.0f, 10.0f);
+    g.setColour (Colour (0xff343843));
+    g.drawRoundedRectangle (8.5f, 480.5f, baseW - 17.0f, 235.0f, 10.0f, 1.0f);
+    g.setColour (gf::gold());
+    g.setFont (Font (FontOptions (13.0f, Font::bold)));
+    g.drawText ("VOICE", 20, 484, 80, 20, Justification::centredLeft);
+    g.setColour (gf::textDim());
+    g.setFont (Font (FontOptions (11.5f)));
+    g.drawText ("drop a sample - it is stretched to the project tempo", 78, 484, 400, 20, Justification::centredLeft);
 }
 
 void GrainFreezeAudioProcessorEditor::selectTab (int tab)
 {
     selectedTab = tab;
-    seqGrid.setVisible (tab == 0);
-    seqLength.slider.setVisible (tab == 0); seqLength.label.setVisible (tab == 0);
-    seqOffset.slider.setVisible (tab == 0); seqOffset.label.setVisible (tab == 0);
-    seqRes.setVisible (tab == 0); seqOn.setVisible (tab == 0);
+    const bool seqPage = (tab == 0);
+    seqGrid.setVisible (seqPage);
+    seqRes->setVisible (seqPage);
+    seqLength->setVisible (seqPage);
+    seqOffset->setVisible (seqPage);
+    seqLengthLbl.setVisible (seqPage);
+    seqOffsetLbl.setVisible (seqPage);
 
     for (int n = 0; n < pid::numEnvelopes; ++n)
     {
         const bool on = (tab == n + 1);
-        curves[n]->setVisible (on);
-        auto* ec = envCtrls[n];
-        ec->mode.setVisible (on); ec->loop.setVisible (on); ec->bars.setVisible (on);
-        ec->steps.setVisible (on); ec->enable.setVisible (on);
-        for (auto* k : ec->depth) { k->slider.setVisible (on); k->label.setVisible (on); }
+        auto* ui = envUI[n];
+        ui->curve->setVisible (on);
+        ui->mode->setVisible (on);
+        ui->bars->setVisible (on);
+        ui->loopBtn.setVisible (on);
+        ui->pingBtn.setVisible (on);
+        const bool stepVis = on && ui->mode->getIndex() == 1;
+        ui->steps->setVisible (stepVis);
+        ui->stepsLabel.setVisible (stepVis);
+        for (auto* k : ui->depth) { k->slider.setVisible (on); k->label.setVisible (on); }
     }
     layoutCanvas();
 }
 
 void GrainFreezeAudioProcessorEditor::resized()
 {
-    // Scale the fixed-size canvas to fill the resizable window (percentage zoom).
     const float scale = (float) getWidth() / (float) baseW;
     canvas.setTransform (AffineTransform::scale (scale));
     canvas.setBounds (0, 0, baseW, baseH);
-    zoomBox.setBounds (getWidth() - 86, 6, 74, 22);
     layoutCanvas();
 }
 
 void GrainFreezeAudioProcessorEditor::layoutCanvas()
 {
-    auto area = juce::Rectangle<int> (0, 0, baseW, baseH).reduced (14);
+    using R = juce::Rectangle<int>;
 
-    // Title strip
-    auto top = area.removeFromTop (28);
-    bypassBtn.setBounds (top.removeFromRight (90));
-    limiterBtn.setBounds (top.removeFromRight (90));
+    // top bar
+    zoomBox.setBounds (baseW - 108, 10, 96, 24);
+    limiterBtn.setBounds (baseW - 188, 10, 72, 24);
+    bypassBtn.setBounds (baseW - 266, 10, 72, 24);
+    liveBtn.setBounds (baseW - 360, 9, 88, 26);
 
-    // --- display panel (tabs + content) ---
-    auto display = area.removeFromTop (210);
-    auto tabRow = display.removeFromTop (24);
-    const int tw = tabRow.getWidth() / 7;
+    // gain strips
+    meterIn.setBounds (14, 62, 88, 202);
+    meterOut.setBounds (baseW - 14 - 88, 62, 88, 202);
+    inKnob->slider.setBounds (R (22, 270, 72, 72));
+    outKnob->slider.setBounds (R (baseW - 94, 270, 72, 72));
+    inBox->setBounds (22, 346, 72, 20);
+    outBox->setBounds (baseW - 94, 346, 72, 20);
+    captions[0]->setBounds (14, 368, 88, 14);
+    captions[1]->setBounds (baseW - 102, 368, 88, 14);
+
+    // tabs
     for (int i = 0; i < 7; ++i)
-        tabs[i]->setBounds (tabRow.removeFromLeft (tw).reduced (1));
-
-    auto content = display.reduced (2);
-    auto rightCol = content.removeFromRight (120);     // per-tab mode/bars/loop/steps
-    auto depthRow = content.removeFromBottom (78);     // depth knobs row
-
-    // content (left) = grid or curve
-    seqGrid.setBounds (content.reduced (4));
-    for (auto* ce : curves) ce->setBounds (content.reduced (4));
-
-    // right column controls
-    if (selectedTab == 0)
     {
-        auto rc = rightCol.reduced (4);
-        seqOn.setBounds (rc.removeFromTop (24));
-        seqRes.setBounds (rc.removeFromTop (24).reduced (0, 2));
-        auto k = rc.removeFromTop (70);
-        seqLength.slider.setBounds (k.removeFromLeft (56)); seqLength.label.setBounds (seqLength.slider.getX(), seqLength.slider.getBottom() - 2, 56, 12);
-        seqOffset.slider.setBounds (k.removeFromLeft (56)); seqOffset.label.setBounds (seqOffset.slider.getX(), seqOffset.slider.getBottom() - 2, 56, 12);
+        tabs[i]->setBounds (110 + i * 72, 56, 72, 24);
+        tabLeds[i]->setBounds (110 + i * 72 + 4, 62, 12, 12);
     }
-    else
-    {
-        const int n = selectedTab - 1;
-        auto* ec = envCtrls[n];
-        auto rc = rightCol.reduced (4);
-        ec->enable.setBounds (rc.removeFromTop (22));
-        ec->mode.setBounds (rc.removeFromTop (22).reduced (0, 1));
-        ec->bars.setBounds (rc.removeFromTop (22).reduced (0, 1));
-        ec->loop.setBounds (rc.removeFromTop (22).reduced (0, 1));
-        ec->steps.setBounds (rc.removeFromTop (60));
 
-        // depth knobs row
-        auto dr = depthRow;
-        const int cnt = ec->depth.size();
-        const int kw = cnt > 0 ? dr.getWidth() / cnt : dr.getWidth();
-        for (auto* k : ec->depth)
+    const R curveArea (112, 84, 404, 152);
+    seqGrid.setBounds (curveArea);
+    for (auto* ui : envUI) ui->curve->setBounds (curveArea);
+
+    // right column of the display
+    const int rx = 524, rw = 84;
+    seqRes->setBounds (rx, 88, rw, 22);
+    seqLengthLbl.setBounds (rx, 116, rw, 13);
+    seqLength->setBounds (rx, 130, rw, 22);
+    seqOffsetLbl.setBounds (rx, 158, rw, 13);
+    seqOffset->setBounds (rx, 172, rw, 22);
+
+    for (int n = 0; n < pid::numEnvelopes; ++n)
+    {
+        auto* ui = envUI[n];
+        ui->mode->setBounds (rx, 88, rw, 22);
+        ui->bars->setBounds (rx, 114, rw, 22);
+        ui->loopBtn.setBounds (rx, 140, rw, 22);
+        ui->pingBtn.setBounds (rx, 166, rw, 22);
+        ui->stepsLabel.setBounds (rx, 194, rw, 13);
+        ui->steps->setBounds (rx, 208, rw, 22);
+
+        // depth strip under the curve
+        const int cnt = ui->depth.size();
+        auto strip = R (114, 242, 492, 46);
+        if (cnt == 1) strip = strip.removeFromRight (190);
+        const int cw = cnt > 0 ? strip.getWidth() / cnt : strip.getWidth();
+        for (auto* k : ui->depth)
         {
-            auto cell = dr.removeFromLeft (kw);
-            k->slider.setBounds (cell.removeFromTop (60));
-            k->label.setBounds (cell);
+            auto cell = strip.removeFromLeft (cw);
+            k->label.setBounds (cell.removeFromTop (13));
+            k->slider.setBounds (cell.withTrimmedBottom (1));
         }
     }
 
-    area.removeFromTop (8);
-
-    // --- centre: FREEZE + reset ---
-    auto centre = area.removeFromTop (120);
-    auto freezeArea = centre.withSizeKeepingCentre (150, 90);
-    freezeBtn.setBounds (freezeArea.removeFromTop (60));
-    resetBtn.setBounds (freezeArea.removeFromTop (26).reduced (24, 0));
-
-    // --- main knobs row ---
-    auto knobRow = area.removeFromTop (110);
-    const int n = mainKnobs.size();
-    const int kw = n > 0 ? knobRow.getWidth() / n : knobRow.getWidth();
-    for (auto* k : mainKnobs)
+    // left / right parameter clusters
+    auto place = [] (Param* p, int boxX, int knobX, int y)
     {
-        auto cell = knobRow.removeFromLeft (kw);
-        k->label.setBounds (cell.removeFromTop (14));
-        k->slider.setBounds (cell);
-    }
+        if (p->knob != nullptr) p->knob->slider.setBounds (knobX, y, 40, 40);
+        if (p->box != nullptr)  p->box->setBounds (boxX, y + 6, 88, 22);
+        if (p->box != nullptr)  p->caption.setBounds (boxX - 6, y + 29, 100, 13);
+        else                    p->caption.setBounds (knobX - 24, y + 41, 88, 13);
+    };
+    // left: knob at x=122, box at x=176
+    place (pOverlap, 0, 122, 300);                 // knob only
+    place (pGrain,   176, 0, 300);                 // box only
+    place (pSpeed,   176, 122, 352);
+    place (pPitch,   176, 122, 404);
+    // right: box at x=456, knob at x=558
+    place (pSpecMix, 456, 0, 300);                 // box only
+    place (pSmear,   0, 558, 300);                 // knob only
+    place (pVolume,  456, 558, 352);
+    place (pReducer, 456, 558, 404);
 
-    // --- voice section ---
-    auto vs = area.removeFromTop (90);
-    auto drop = vs.removeFromLeft (vs.getWidth() - 320);
-    voice.setBounds (drop.reduced (2, 8));
-    auto vc = vs.reduced (4, 8);
-    voiceEnable.setBounds (vc.removeFromTop (22));
-    stretchSync.setBounds (vc.removeFromTop (22));
-    auto vk = vc;
-    voiceGain.slider.setBounds (vk.removeFromLeft (70).withHeight (60));
-    voiceGain.label.setBounds (voiceGain.slider.getX(), voiceGain.slider.getBottom(), 70, 12);
-    stretchRatio.slider.setBounds (vk.removeFromLeft (70).withHeight (60));
-    stretchRatio.label.setBounds (stretchRatio.slider.getX(), stretchRatio.slider.getBottom(), 70, 12);
+    freezeBtn.setBounds (300, 298, 120, 120);
+    ledTime.setBounds (296, 424, 128, 26);
+    resetBtn.setBounds (322, 454, 76, 18);
+
+    // voice section
+    voice.setBounds (18, 508, baseW - 36, 154);
+    voiceEnable.setBounds (18, 672, 72, 24);
+    stretchSync.setBounds (96, 672, 108, 24);
+    voiceGainLbl.setBounds (212, 674, 36, 20);
+    voiceGainBox->setBounds (252, 674, 84, 22);
+    stretchLbl.setBounds (346, 674, 48, 20);
+    stretchBox->setBounds (398, 674, 84, 22);
+    loadBtn.setBounds (baseW - 18 - 104, 672, 104, 24);
 }
 
 void GrainFreezeAudioProcessorEditor::timerCallback()
 {
+    meterIn.setLevels  (proc.inLevel[0].load(),  proc.inLevel[1].load());
+    meterOut.setLevels (proc.outLevel[0].load(), proc.outLevel[1].load());
     seqGrid.setPlayStep (proc.currentStep.load (std::memory_order_relaxed));
-    voice.setInfo (proc.getSampleName(), proc.getDetectedBpm(), proc.getProjectBpm());
+    ledTime.set (proc.frozenUI.load() ? proc.freezeSeconds.load() : 0.0);
+
+    // envelopes: activity + playheads, and re-read curves after a preset/session load
+    const int rev = proc.curvesRevision.load();
+    for (int n = 0; n < pid::numEnvelopes; ++n)
+    {
+        auto* ui = envUI[n];
+        if (rev != lastCurvesRevision) ui->curve->reloadFromModulator();
+        ui->curve->setActive (proc.apvts.getRawParameterValue (pid::envField (n, "enable"))->load() > 0.5f);
+        if (selectedTab == n + 1) ui->curve->setPhase (proc.modulator (n).getPhase());
+    }
+    lastCurvesRevision = rev;
+
+    // voice
+    if (const int v = proc.getSampleVersion(); v != lastSampleVersion)
+    {
+        lastSampleVersion = v;
+        double dur = 0.0;
+        auto pk = proc.getPeaks (dur);
+        voice.setPeaks (std::move (pk), dur);
+    }
+    const bool sync = proc.apvts.getRawParameterValue (pid::stretchSync)->load() > 0.5f;
+    voice.setInfo (proc.getSampleName(), proc.getDetectedBpm(), proc.getProjectBpm(), sync, proc.frozenUI.load());
+    voice.setPlayhead (proc.samplePlayNorm.load (std::memory_order_relaxed));
+    stretchBox->setEnabled (! sync);
 }

@@ -41,6 +41,7 @@ namespace pid
     constexpr auto outputGain = "outputGain";
     constexpr auto bypass     = "bypass";
     constexpr auto limiterOn  = "limiterOn";
+    constexpr auto live       = "live";          // effect active on live playback (unfrozen)
 
     // ---- granular core ----
     constexpr auto grainSize    = "grainSize";

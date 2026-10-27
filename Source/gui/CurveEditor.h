@@ -1,62 +1,99 @@
 #pragma once
 #include <JuceHeader.h>
 #include "../dsp/StepModulator.h"
+#include "GFLookAndFeel.h"
 
 // ---------------------------------------------------------------------------
-// CurveEditor
+// CurveEditor  --  the envelope display / automation writer.
 //
-// A breakpoint curve editor bound to one StepModulator. Points are (time, value)
-// in 0..1. Click empty space to add a point, drag to move, double-click a point
-// to delete it (never the two endpoints). In STEP mode the curve is drawn as a
-// stair; in SMOOTH mode as connected ramps. Changes push straight into the
-// modulator the processor owns, so they are heard immediately.
+//  * NORMAL mode: breakpoint curve. Click empty space = add point, drag = move,
+//    double-click = delete, SHIFT+drag = freehand pencil.
+//  * STEP mode  : stair display; click/drag paints step heights (pencil style).
+//  * Right-click = shapes menu (flat, ramps, triangle, sine, random, decay).
+//  * Beat grid follows the "bars" setting, a playhead follows the host position.
 //
+// It edits the StepModulator the processor owns, so changes are heard at once.
 // (Original component.)
 // ---------------------------------------------------------------------------
 
 class CurveEditor : public juce::Component
 {
 public:
-    explicit CurveEditor (StepModulator& m) : mod (m) {}
+    explicit CurveEditor (StepModulator& m) : mod (m) { reloadFromModulator(); }
 
-    void setMode (EnvMode m) { mode = m; repaint(); }
-    void setStepCount (int n) { steps = juce::jlimit (2, 32, n); repaint(); }
-
-    // Supply the current curve to draw/edit (editor owns a working copy).
-    void setCurve (std::vector<juce::Point<float>> pts)
+    void reloadFromModulator()
     {
-        curve = std::move (pts);
+        curve = mod.getCurve();
+        if (curve.size() < 2) curve = { { 0.f, 0.5f }, { 1.f, 0.5f } };
         sortCurve();
-        pushToModulator();
+        stepVals.clear();
         repaint();
     }
 
-    const std::vector<juce::Point<float>>& getCurve() const { return curve; }
+    void setMode (EnvMode m)      { mode = m; stepVals.clear(); repaint(); }
+    void setStepCount (int n)     { steps = juce::jlimit (2, 32, n); stepVals.clear(); repaint(); }
+    void setBars (double b)       { bars = b; repaint(); }
+    void setBipolar (bool b)      { bipolar = b; repaint(); }
+    void setActive (bool a)       { active = a; repaint(); }
+    void setPhase (float p)       { if (std::abs (p - phase) > 0.0015f) { phase = p; repaint(); } }
 
     void paint (juce::Graphics& g) override
     {
-        auto r = getLocalBounds().toFloat().reduced (4.0f);
-        g.setColour (juce::Colour (0xff23262e));
-        g.fillRoundedRectangle (r, 4.0f);
+        auto full = getLocalBounds().toFloat();
+        auto r = plot();
 
-        // Midline (bipolar 0).
-        g.setColour (juce::Colours::white.withAlpha (0.08f));
-        g.drawHorizontalLine ((int) r.getCentreY(), r.getX(), r.getRight());
+        // recessed background
+        juce::ColourGradient bg (juce::Colour (0xff1a1c21), 0, full.getY(), juce::Colour (0xff0b0c0e), 0, full.getBottom(), false);
+        g.setGradientFill (bg);
+        g.fillRoundedRectangle (full, 4.0f);
+        g.setColour (juce::Colour (0xff2c3038));
+        g.drawRoundedRectangle (full.reduced (0.5f), 4.0f, 1.0f);
+
+        // horizontal grid + y labels
+        g.setFont (juce::Font (juce::FontOptions (9.5f)));
+        const std::vector<std::pair<float, juce::String>> ylab = bipolar
+            ? std::vector<std::pair<float, juce::String>> { { 0.75f, "+50%" }, { 0.5f, "0%" }, { 0.25f, "-50%" } }
+            : std::vector<std::pair<float, juce::String>> { { 0.75f, "75%" }, { 0.5f, "50%" }, { 0.25f, "25%" }, { 0.0f, "0%" } };
+        for (auto& [v, t] : ylab)
+        {
+            const float y = juce::jmap (v, r.getBottom(), r.getY());
+            g.setColour (juce::Colours::white.withAlpha (0.07f));
+            g.drawHorizontalLine ((int) y, r.getX(), r.getRight());
+            g.setColour (juce::Colour (0xff777d89));
+            g.drawText (t, juce::Rectangle<float> (full.getX() + 1.0f, y - 6.0f, r.getX() - full.getX() - 2.0f, 12.0f),
+                        juce::Justification::centredRight);
+        }
+
+        // vertical beat grid + x labels
+        const int beats = juce::jmax (2, (int) std::lround (bars * 4.0));
+        const int every = beats > 16 ? 4 : (beats > 8 ? 2 : 1);
+        for (int i = 0; i <= beats; ++i)
+        {
+            const float x = juce::jmap ((float) i / (float) beats, r.getX(), r.getRight());
+            const bool bar = (i % 4) == 0;
+            g.setColour (juce::Colours::white.withAlpha (bar ? 0.16f : 0.06f));
+            g.drawVerticalLine ((int) x, r.getY(), r.getBottom());
+            if (i > 0 && i < beats && (i % every) == 0)
+            {
+                g.setColour (juce::Colour (0xff777d89));
+                g.drawText (juce::String (i), juce::Rectangle<float> (x - 10.0f, r.getBottom() + 1.0f, 20.0f, 12.0f),
+                            juce::Justification::centred);
+            }
+        }
 
         if (curve.size() < 2) return;
 
-        juce::Path p;
+        // curve path
+        juce::Path line;
         if (mode == EnvMode::step)
         {
             for (int s = 0; s < steps; ++s)
             {
                 const float x0 = juce::jmap ((float) s / steps, r.getX(), r.getRight());
                 const float x1 = juce::jmap ((float) (s + 1) / steps, r.getX(), r.getRight());
-                const float v  = valueAt ((s + 0.5f) / steps);
-                const float y  = juce::jmap (v, r.getBottom(), r.getY());
-                if (s == 0) p.startNewSubPath (x0, y);
-                else        p.lineTo (x0, y);
-                p.lineTo (x1, y);
+                const float y  = juce::jmap (valueAt ((s + 0.5f) / steps), r.getBottom(), r.getY());
+                if (s == 0) line.startNewSubPath (x0, y); else line.lineTo (x0, y);
+                line.lineTo (x1, y);
             }
         }
         else
@@ -65,65 +102,101 @@ public:
             {
                 const float x = juce::jmap (curve[i].x, r.getX(), r.getRight());
                 const float y = juce::jmap (curve[i].y, r.getBottom(), r.getY());
-                if (i == 0) p.startNewSubPath (x, y);
-                else        p.lineTo (x, y);
+                if (i == 0) line.startNewSubPath (x, y); else line.lineTo (x, y);
             }
         }
-        g.setColour (juce::Colour (0xffd9c24a));
-        g.strokePath (p, juce::PathStrokeType (2.0f));
 
-        // Draw the handles.
-        g.setColour (juce::Colours::white);
-        for (auto& pt : curve)
+        const auto col = active ? gf::gold() : gf::goldDim();
+        juce::Path fill (line);
+        fill.lineTo (r.getRight(), r.getBottom());
+        fill.lineTo (r.getX(), r.getBottom());
+        fill.closeSubPath();
+        g.setColour (col.withAlpha (active ? 0.22f : 0.12f));
+        g.fillPath (fill);
+        g.setColour (col);
+        g.strokePath (line, juce::PathStrokeType (2.0f));
+
+        if (mode == EnvMode::normal)
         {
-            const float x = juce::jmap (pt.x, r.getX(), r.getRight());
-            const float y = juce::jmap (pt.y, r.getBottom(), r.getY());
-            g.fillEllipse (x - 4, y - 4, 8, 8);
+            g.setColour (active ? gf::gold() : gf::goldDim());
+            for (auto& pt : curve)
+            {
+                const float x = juce::jmap (pt.x, r.getX(), r.getRight());
+                const float y = juce::jmap (pt.y, r.getBottom(), r.getY());
+                g.fillEllipse (x - 4.5f, y - 4.5f, 9.0f, 9.0f);
+                g.setColour (juce::Colour (0xff111215));
+                g.drawEllipse (x - 4.5f, y - 4.5f, 9.0f, 9.0f, 1.0f);
+                g.setColour (active ? gf::gold() : gf::goldDim());
+            }
+        }
+
+        // playhead
+        if (active)
+        {
+            const float px = juce::jmap (phase, r.getX(), r.getRight());
+            g.setColour (juce::Colours::white.withAlpha (0.55f));
+            g.drawVerticalLine ((int) px, r.getY(), r.getBottom());
         }
     }
 
     void mouseDown (const juce::MouseEvent& e) override
     {
+        if (e.mods.isPopupMenu()) { showShapeMenu(); return; }
+
+        if (mode == EnvMode::step) { lastStep = -1; paintStep (e.position); return; }
+
         dragIndex = nearestPoint (e.position);
+        pencil = e.mods.isShiftDown() && dragIndex < 0;
+        if (pencil) { pencilAdd (e.position); return; }
+
         if (dragIndex < 0)
         {
-            // add a point
-            auto pt = toCurve (e.position);
+            const auto pt = toCurve (e.position);
             curve.push_back (pt);
             sortCurve();
             dragIndex = indexOfX (pt.x);
-            pushToModulator();
-            repaint();
+            push();
         }
     }
 
     void mouseDrag (const juce::MouseEvent& e) override
     {
+        if (e.mods.isPopupMenu()) return;
+        if (mode == EnvMode::step) { paintStep (e.position); return; }
+        if (pencil) { pencilAdd (e.position); return; }
         if (dragIndex < 0) return;
-        auto pt = toCurve (e.position);
-        // Endpoints keep their x; interior points move freely but stay ordered.
+
+        const auto pt = toCurve (e.position);
         const bool isEnd = (dragIndex == 0 || dragIndex == (int) curve.size() - 1);
-        curve[(size_t) dragIndex].y = juce::jlimit (0.0f, 1.0f, pt.y);
+        curve[(size_t) dragIndex].y = pt.y;
         if (! isEnd)
-            curve[(size_t) dragIndex].x = juce::jlimit (0.001f, 0.999f, pt.x);
-        sortCurve();
-        pushToModulator();
-        repaint();
+        {
+            const float lo = curve[(size_t) dragIndex - 1].x + 0.002f;
+            const float hi = curve[(size_t) dragIndex + 1].x - 0.002f;
+            curve[(size_t) dragIndex].x = juce::jlimit (lo, juce::jmax (lo, hi), pt.x);
+        }
+        push();
     }
+
+    void mouseUp (const juce::MouseEvent&) override { dragIndex = -1; pencil = false; }
 
     void mouseDoubleClick (const juce::MouseEvent& e) override
     {
+        if (mode != EnvMode::normal) return;
         const int i = nearestPoint (e.position);
-        if (i > 0 && i < (int) curve.size() - 1)   // never delete endpoints
+        if (i > 0 && i < (int) curve.size() - 1)
         {
             curve.erase (curve.begin() + i);
-            pushToModulator();
-            repaint();
+            push();
         }
     }
 
 private:
-    juce::Rectangle<float> plot() const { return getLocalBounds().toFloat().reduced (4.0f); }
+    juce::Rectangle<float> plot() const
+    {
+        return getLocalBounds().toFloat().withTrimmedLeft (30.0f).withTrimmedRight (6.0f)
+                                         .withTrimmedTop (6.0f).withTrimmedBottom (15.0f);
+    }
 
     juce::Point<float> toCurve (juce::Point<float> px) const
     {
@@ -135,7 +208,7 @@ private:
     int nearestPoint (juce::Point<float> px) const
     {
         auto r = plot();
-        int best = -1; float bestD = 12.0f;
+        int best = -1; float bestD = 11.0f;
         for (size_t i = 0; i < curve.size(); ++i)
         {
             const float x = juce::jmap (curve[i].x, r.getX(), r.getRight());
@@ -168,15 +241,114 @@ private:
 
     void sortCurve()
     {
-        std::sort (curve.begin(), curve.end(),
-                   [] (auto& a, auto& b) { return a.x < b.x; });
+        std::sort (curve.begin(), curve.end(), [] (auto& a, auto& b) { return a.x < b.x; });
     }
 
-    void pushToModulator() { mod.setCurve (curve); }
+    void push() { mod.setCurve (curve); repaint(); }
+
+    // freehand drawing in NORMAL mode
+    void pencilAdd (juce::Point<float> px)
+    {
+        const auto pt = toCurve (px);
+        if (pt.x < 0.01f)      { curve.front().y = pt.y; push(); return; }
+        if (pt.x > 0.99f)      { curve.back().y  = pt.y; push(); return; }
+        for (int i = (int) curve.size() - 2; i >= 1; --i)
+            if (std::abs (curve[(size_t) i].x - pt.x) < 0.008f)
+                curve.erase (curve.begin() + i);
+        curve.push_back (pt);
+        sortCurve();
+        push();
+    }
+
+    // paint-style editing in STEP mode
+    void captureSteps()
+    {
+        stepVals.assign ((size_t) steps, 0.5f);
+        for (int s = 0; s < steps; ++s) stepVals[(size_t) s] = valueAt ((s + 0.5f) / (float) steps);
+    }
+
+    void paintStep (juce::Point<float> px)
+    {
+        if (stepVals.size() != (size_t) steps) captureSteps();
+        auto r = plot();
+        const int s = juce::jlimit (0, steps - 1, (int) ((px.x - r.getX()) / r.getWidth() * (float) steps));
+        const float v = toCurve (px).y;
+        const int a = lastStep < 0 ? s : juce::jmin (lastStep, s);
+        const int b = lastStep < 0 ? s : juce::jmax (lastStep, s);
+        for (int i = a; i <= b; ++i) stepVals[(size_t) i] = v;
+        lastStep = s;
+        rebuildFromSteps();
+    }
+
+    void rebuildFromSteps()
+    {
+        curve.clear();
+        curve.push_back ({ 0.0f, stepVals.front() });
+        for (int s = 0; s < steps; ++s)
+            curve.push_back ({ (s + 0.5f) / (float) steps, stepVals[(size_t) s] });
+        curve.push_back ({ 1.0f, stepVals.back() });
+        push();
+    }
+
+    void setShape (std::function<float (float)> f, int points)
+    {
+        curve.clear();
+        for (int i = 0; i < points; ++i)
+        {
+            const float x = (float) i / (float) (points - 1);
+            curve.push_back ({ x, juce::jlimit (0.0f, 1.0f, f (x)) });
+        }
+        stepVals.clear();
+        push();
+    }
+
+    void showShapeMenu()
+    {
+        juce::PopupMenu m;
+        m.addItem (1, "Flat 100%");
+        m.addItem (2, "Flat 50%");
+        m.addItem (3, "Flat 0%");
+        m.addSeparator();
+        m.addItem (4, "Ramp up");
+        m.addItem (5, "Ramp down");
+        m.addItem (6, "Triangle");
+        m.addItem (7, "Sine");
+        m.addItem (8, "Decay");
+        m.addItem (9, "Random steps");
+        m.showMenuAsync (juce::PopupMenu::Options(), [safe = juce::Component::SafePointer<CurveEditor> (this)] (int id)
+        {
+            if (safe == nullptr || id == 0) return;
+            auto* s = safe.getComponent();
+            switch (id)
+            {
+                case 1: s->setShape ([] (float)   { return 1.0f; }, 2); break;
+                case 2: s->setShape ([] (float)   { return 0.5f; }, 2); break;
+                case 3: s->setShape ([] (float)   { return 0.0f; }, 2); break;
+                case 4: s->setShape ([] (float x) { return x; }, 2); break;
+                case 5: s->setShape ([] (float x) { return 1.0f - x; }, 2); break;
+                case 6: s->setShape ([] (float x) { return x < 0.5f ? x * 2.0f : 2.0f - x * 2.0f; }, 3); break;
+                case 7: s->setShape ([] (float x) { return 0.5f + 0.5f * std::sin (juce::MathConstants<float>::twoPi * x); }, 49); break;
+                case 8: s->setShape ([] (float x) { return std::pow (1.0f - x, 2.2f); }, 33); break;
+                case 9:
+                {
+                    juce::Random rnd;
+                    s->stepVals.assign ((size_t) s->steps, 0.0f);
+                    for (auto& v : s->stepVals) v = rnd.nextFloat();
+                    s->rebuildFromSteps();
+                    break;
+                }
+                default: break;
+            }
+        });
+    }
 
     StepModulator& mod;
-    std::vector<juce::Point<float>> curve { {0.f, 0.5f}, {1.f, 0.5f} };
+    std::vector<juce::Point<float>> curve { { 0.f, 0.5f }, { 1.f, 0.5f } };
+    std::vector<float> stepVals;
     EnvMode mode = EnvMode::normal;
     int steps = 16;
-    int dragIndex = -1;
+    double bars = 2.0;
+    bool bipolar = false, active = false, pencil = false;
+    float phase = 0.0f;
+    int dragIndex = -1, lastStep = -1;
 };

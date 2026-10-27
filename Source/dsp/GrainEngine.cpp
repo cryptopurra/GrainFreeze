@@ -16,9 +16,8 @@ void GrainEngine::reset()
 
 float GrainEngine::window (float phase01) const noexcept
 {
-    // Tukey-ish window: raised-cosine fades, flat centre. Keeps grains smooth
-    // without over-softening transients. (Original implementation.)
-    constexpr float edge = 0.25f; // fraction of grain spent fading in/out
+    // Tukey-ish window: raised-cosine fades, flat centre. (Original implementation.)
+    constexpr float edge = 0.25f;
     if (phase01 < edge)
         return 0.5f * (1.0f - std::cos (juce::MathConstants<float>::pi * phase01 / edge));
     if (phase01 > 1.0f - edge)
@@ -34,12 +33,27 @@ void GrainEngine::spawnGrain()
     {
         if (g.active) continue;
 
-        const int   len   = juce::jmax (16, (int) grainSizeSmooth);
-        const double anchor = capture->getAnchor();
+        const int    len  = juce::jmax (16, (int) grainSizeSmooth);
+        const double rate = (double) pitchRatio;
+        const double reach = (double) len * juce::jmax (1.0, rate);   // how far a grain reads
 
-        // Read origin: scan position behind the anchor, plus optional jitter.
-        double jit = jitter * (rng.nextFloat() * 2.0f - 1.0f) * (double) len;
-        double origin = anchor - scanPhase - jit;
+        double origin;
+        if (! capture->isFrozen())
+        {
+            // LIVE: read a little behind "now". The delay is at least the distance the
+            // grain will travel, so pitched-up grains never overtake the write head.
+            origin = curAnchor - (reach + 64.0);
+        }
+        else
+        {
+            // FROZEN: the input is parked. Grains start inside the last `windowSize`
+            // samples before the freeze point, and the start point scans through that
+            // window at `Speed`. 0 = static freeze, 1 = real-time passage.
+            const double windowSize = juce::jmax (sr * 1.5, reach * 2.0 + 64.0);
+            const double span = juce::jmax (1.0, windowSize - reach);
+            const double jit  = jitter * (double) len * (double) rng.nextFloat();
+            origin = curAnchor - windowSize + std::fmod (scanPhase + jit, span);
+        }
 
         const float panPos = 0.5f + spread * (rng.nextFloat() - 0.5f);
 
@@ -47,7 +61,7 @@ void GrainEngine::spawnGrain()
         g.age     = 0;
         g.length  = len;
         g.readPos = origin;
-        g.rate    = (double) pitchRatio;
+        g.rate    = rate;
         g.panL    = std::sqrt (1.0f - panPos);
         g.panR    = std::sqrt (panPos);
         return;
@@ -62,21 +76,25 @@ void GrainEngine::process (juce::AudioBuffer<float>& out, int numSamples)
     auto* L = out.getWritePointer (0);
     auto* R = out.getNumChannels() > 1 ? out.getWritePointer (1) : L;
 
-    // Grain spacing from size & overlap: higher overlap -> grains closer.
-    const float sizeNow = grainSizeSmooth;
-    const float density = juce::jmax (1.0f, 1.0f + overlap * 8.0f);  // grains overlapping
-    const double spawnInterval = juce::jmax (8.0, (double) sizeNow / density);
+    const bool frozen = capture->isFrozen();
+    const double rateA = frozen ? 0.0 : anchorRate;
+    // getAnchor() is the END of this block for a moving source, so step back.
+    const double anchorStart = capture->getAnchor() - rateA * (double) numSamples;
+
+    if (! frozen) scanPhase = 0.0;
+
+    const float density = juce::jmax (1.0f, 1.0f + overlap * 8.0f);
+    const float norm = 1.0f / std::sqrt (density);
 
     for (int s = 0; s < numSamples; ++s)
     {
-        // Smooth grain size to avoid zipper noise when modulated fast.
         grainSizeSmooth += (grainSizeTarget - grainSizeSmooth) * 0.001f;
+        curAnchor = anchorStart + rateA * (double) s;
 
-        // Schedule new grains.
         if (--spawnCounter <= 0.0)
         {
             spawnGrain();
-            spawnCounter += spawnInterval;
+            spawnCounter += juce::jmax (8.0, (double) grainSizeSmooth / (double) density);
         }
 
         float sl = 0.0f, sr_ = 0.0f;
@@ -84,26 +102,18 @@ void GrainEngine::process (juce::AudioBuffer<float>& out, int numSamples)
         {
             if (! g.active) continue;
 
-            const float ph = (float) g.age / (float) g.length;
-            const float w  = window (ph);
-            const float smp = capture->readSample (0, g.readPos);
-            const float smpR = capture->getNumChannels() > 1
-                                 ? capture->readSample (1, g.readPos) : smp;
-
-            sl += smp  * w * g.panL;
-            sr_ += smpR * w * g.panR;
+            const float w = window ((float) g.age / (float) g.length);
+            sl  += capture->readSample (0, g.readPos) * w * g.panL;
+            sr_ += capture->readSample (1, g.readPos) * w * g.panR;
 
             g.readPos += g.rate;
             if (++g.age >= g.length)
                 g.active = false;
         }
 
-        // Normalise roughly by sqrt of overlap so level stays stable.
-        const float norm = 1.0f / std::sqrt (density);
         L[s] = sl * norm;
         R[s] = sr_ * norm;
 
-        // Advance the cloud's scan origin (negative speed = reverse read).
-        scanPhase += (double) scanSpeed;
+        if (frozen) scanPhase += (double) scanSpeed;
     }
 }
