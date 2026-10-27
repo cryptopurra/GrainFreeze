@@ -1,0 +1,23 @@
+# Build output
+/build/
+/dist/
+*.o
+*.obj
+*.a
+*.lib
+
+# JUCE checkout (pulled by CI / cloned locally; don't commit it)
+/extern/JUCE/
+
+# IDE / OS cruft
+.vs/
+.idea/
+.vscode/
+*.user
+.DS_Store
+Thumbs.db
+
+# Plugin bundles accidentally left in-tree
+*.vst3
+*.component
+*.app

@@ -1,0 +1,76 @@
+name: Build GrainFreeze
+
+# Builds VST3 / AU / Standalone on Windows, macOS and Linux and uploads the
+# compiled plugins as downloadable artifacts. JUCE is pulled in automatically.
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:   # lets you run it manually from the Actions tab
+
+env:
+  JUCE_VERSION: 8.0.4   # pin a known-good JUCE release
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: Windows
+          - os: macos-latest
+            name: macOS
+          - os: ubuntu-latest
+            name: Linux
+
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Checkout JUCE
+        uses: actions/checkout@v4
+        with:
+          repository: juce-framework/JUCE
+          ref: ${{ env.JUCE_VERSION }}
+          path: extern/JUCE
+
+      # Linux needs JUCE's system dependencies (ALSA, X11, GTK, etc.)
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev libjack-jackd2-dev libcurl4-openssl-dev \
+            libfreetype6-dev libx11-dev libxcomposite-dev libxcursor-dev \
+            libxext-dev libxinerama-dev libxrandr-dev libxrender-dev \
+            libwebkit2gtk-4.1-dev libglu1-mesa-dev mesa-common-dev \
+            ninja-build
+
+      - name: Configure (CMake)
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 4
+
+      # Collect the built plugin bundles into one folder per OS.
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          # JUCE writes bundles under build/GrainFreeze_artefacts/Release/<FORMAT>/
+          find build -path "*GrainFreeze_artefacts*Release*" \
+            \( -name "*.vst3" -o -name "*.component" -o -name "*.app" \
+               -o -name "GrainFreeze" -o -name "GrainFreeze.exe" \) \
+            -exec cp -R {} dist/ \; || true
+          ls -laR dist || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: GrainFreeze-${{ matrix.name }}
+          path: dist/**
+          if-no-files-found: warn
