@@ -24,9 +24,8 @@ void GrainEngine::spawn (double liveNow)
             g.readPos = std::fmod (scanPhase + jit, span);
         }
 
-        const float pan = 0.5f + 0.3f * (rng.nextFloat() - 0.5f);
         g.active = true; g.age = 0; g.length = len; g.rate = rate;
-        g.panL = std::sqrt (1.0f - pan); g.panR = std::sqrt (pan);
+        g.panL = 1.0f; g.panR = 1.0f;          // keep the stereo image of the source (TimeFreeze output is not spread)
         return;
     }
 }
@@ -41,7 +40,7 @@ void GrainEngine::process (juce::AudioBuffer<float>& out, int numSamples)
 
     const double liveStart = (double) capture->getWriteHead() - (double) numSamples;
     const float density = 1.0f + overlap * 8.0f;
-    const float norm = 1.0f / std::sqrt (density);
+    const float norm = 1.15f / std::sqrt (density);      // noise ~0.8x, pure tones ~1.9x (coherent sum)
 
     for (int s = 0; s < numSamples; ++s)
     {

@@ -107,7 +107,7 @@ APVTS::ParameterLayout createParameterLayout()
 
     // --- granular core ---
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { pid::grainSize, 1 },    "Grain Size",    NormalisableRange<float> (128.f, 4096.f, 1.f, 0.5f), 2048.f, intAttr()));
-    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { pid::grainOverlap, 1 }, "Overlap",       pct(), 0.5f, pctAttr()));
+    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { pid::grainOverlap, 1 }, "Overlap",       pct(), 1.0f, pctAttr()));
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { pid::grainPitch, 1 },   "Pitch",         NormalisableRange<float> (-100.f, 100.f, 0.1f), 0.f, pitchAttr()));
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { pid::scanSpeed, 1 },    "Speed",         pct(), 1.0f, pctAttr()));
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { pid::volume, 1 },       "Volume",        NormalisableRange<float> (0.f, 2.f, 0.001f), 1.f, gainDbAttr()));
@@ -144,7 +144,7 @@ APVTS::ParameterLayout createParameterLayout()
                 ParameterID { pid::envDepth (n, d), 1 },
                 spec.name + " " + modDestLabel (d),
                 NormalisableRange<float> (-1.f, 1.f, 0.001f),
-                (n < 2 ? 1.f : 0.5f), pctAttr()));
+                (n < 2 ? 1.f : 0.f), pctAttr()));
     }
 
     return layout;
