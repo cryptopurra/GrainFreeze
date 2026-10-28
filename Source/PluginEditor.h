@@ -4,7 +4,6 @@
 #include "gui/GFLookAndFeel.h"
 #include "gui/SequencerGrid.h"
 #include "gui/CurveEditor.h"
-#include "gui/VoicePanel.h"
 #include "gui/ValueBox.h"
 #include "gui/CycleButton.h"
 #include "gui/Meter.h"
@@ -12,8 +11,7 @@
 // ---------------------------------------------------------------------------
 // Editor: TimeFreeze-style functional layout (meters + gain knobs left/right,
 // tabbed envelope display in the middle, knob clusters around a big FREEZE
-// button) plus a dedicated VOICE section with a waveform view underneath.
-// Original skin; resizable and percentage-zoomable (the fixed-size canvas is
+// button). Original skin; resizable and percentage-zoomable (the fixed-size canvas is
 // scaled to the window).
 // ---------------------------------------------------------------------------
 
@@ -28,7 +26,7 @@ public:
     void resized() override;
     void timerCallback() override;
 
-    static constexpr int baseW = 720, baseH = 724;
+    static constexpr int baseW = 720, baseH = 484;
 
 private:
     using APVTS = juce::AudioProcessorValueTreeState;
@@ -83,8 +81,8 @@ private:
     // display contents
     SequencerGrid seqGrid { proc.sequencer() };
     std::unique_ptr<CycleButton> seqRes;
-    std::unique_ptr<ValueBox> seqLength, seqOffset;
-    juce::Label seqLengthLbl, seqOffsetLbl;
+    std::unique_ptr<ValueBox> seqLength;
+    juce::Label seqLengthLbl;
     juce::OwnedArray<EnvUI> envUI;
 
     // main clusters
@@ -122,15 +120,6 @@ private:
         }
         juce::String text { "-00:00:000" };
     } ledTime;
-
-    // voice section
-    VoicePanel voice;
-    juce::ToggleButton voiceEnable { "Voice" }, stretchSync { "Sync Tempo" };
-    juce::TextButton loadBtn { "Load..." };
-    std::unique_ptr<APVTS::ButtonAttachment> voiceEnableA, stretchSyncA;
-    std::unique_ptr<ValueBox> voiceGainBox, stretchBox;
-    juce::Label voiceGainLbl, stretchLbl;
-    int lastSampleVersion = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GrainFreezeAudioProcessorEditor)
 };

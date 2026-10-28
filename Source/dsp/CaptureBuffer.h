@@ -4,72 +4,82 @@
 // ---------------------------------------------------------------------------
 // CaptureBuffer
 //
-// Holds the material the engines read from. Two sources:
-//
-//   LIVE INPUT  : a stereo ring buffer that is always being written from the
-//                 plugin input. Freeze parks the read anchor (time-freeze);
-//                 unfrozen, the anchor tracks the write head (live granular).
-//
-//   LOADED VOICE: a dropped audio sample. A playhead moves through it, advanced
-//                 by the processor at a stretch ratio (for tempo-sync time-
-//                 stretch). Freeze parks the playhead too.
-//
-// Which source is active is chosen by setUseSample(). Engines call readSample()
-// and getAnchor() without needing to know which source is live.
+//   ring   : stereo ring, ALWAYS recording the input (so LIVE is always right).
+//   frozen : a snapshot of the last `frozenLen` samples, copied the instant
+//            Freeze engages. Frozen grains read this snapshot, so un-freezing
+//            never sees stale or half-overwritten audio.
 // ---------------------------------------------------------------------------
-
 class CaptureBuffer
 {
 public:
-    void prepare (double sampleRate, int maxBlock, double seconds = 8.0);
-    void reset();
+    void prepare (double sampleRate, double ringSeconds = 4.0, double frozenSeconds = 1.0)
+    {
+        ringLen   = juce::jmax (4096, (int) std::ceil (sampleRate * ringSeconds));
+        frozenLen = juce::jmax (4096, (int) std::ceil (sampleRate * frozenSeconds));
+        ring.setSize (2, ringLen, false, true, true);
+        frozen.setSize (2, frozenLen, false, true, true);
+        reset();
+    }
 
-    // --- live input ---
-    void writeBlock (const juce::AudioBuffer<float>& in);
+    void reset()
+    {
+        ring.clear(); frozen.clear();
+        writeHead = 0;
+    }
 
-    // --- loaded sample (voice) ---
-    // Replaces the sample content; `fileSampleRate` is resampled to host rate.
-    void loadSample (const juce::AudioBuffer<float>& src, double fileSampleRate);
-    bool hasSample() const noexcept { return sampleLength > 0; }
-    int  getSampleLength() const noexcept { return sampleLength; }
-    void clearSample() noexcept { sampleLength = 0; samplePlayhead = 0.0; }
+    void writeBlock (const juce::AudioBuffer<float>& in)
+    {
+        const int n = in.getNumSamples();
+        const int chans = in.getNumChannels();
+        for (int c = 0; c < 2; ++c)
+        {
+            const float* src = in.getReadPointer (juce::jmin (c, chans - 1));
+            float* dst = ring.getWritePointer (c);
+            int w = writeHead;
+            for (int i = 0; i < n; ++i)
+            {
+                dst[w] = src[i];
+                if (++w >= ringLen) w = 0;
+            }
+        }
+        writeHead = (writeHead + n) % ringLen;
+    }
 
-    void setUseSample (bool use) noexcept { useSample = use; }
-    bool usingSample() const noexcept { return useSample && hasSample(); }
+    // Copy the most recent frozenLen samples into the snapshot (oldest first).
+    void snapshot()
+    {
+        for (int c = 0; c < 2; ++c)
+        {
+            const float* src = ring.getReadPointer (c);
+            float* dst = frozen.getWritePointer (c);
+            int r = ((writeHead - frozenLen) % ringLen + ringLen) % ringLen;
+            for (int i = 0; i < frozenLen; ++i)
+            {
+                dst[i] = src[r];
+                if (++r >= ringLen) r = 0;
+            }
+        }
+    }
 
-    // Advance the sample playhead by `delta` samples (stretch * blockSize),
-    // called once per block by the processor. Wraps over the sample length.
-    void advanceSamplePlayhead (double delta) noexcept;
-    // Sets the playhead absolutely (tempo-locked sync); wraps over the sample length.
-    void setSamplePlayhead (double pos) noexcept;
-    double getSamplePlayhead() const noexcept { return samplePlayhead; }
+    float readLive (int ch, double pos) const noexcept   { return wrapRead (ring, ringLen, ch, pos); }
+    float readFrozen (int ch, double pos) const noexcept { return wrapRead (frozen, frozenLen, ch, pos); }
 
-    // --- freeze (applies to whichever source is active) ---
-    void setFrozen (bool shouldFreeze) noexcept;
-    bool isFrozen() const noexcept { return frozen; }
-
-    // --- reads (engines) ---
-    float  readSample (int channel, double pos) const noexcept;
-    double getAnchor() const noexcept;
-
-    int getNumChannels() const noexcept { return 2; }
-    int getLength()      const noexcept { return usingSample() ? sampleLength : length; }
+    int getWriteHead() const noexcept { return writeHead; }
+    int getFrozenLen() const noexcept { return frozenLen; }
+    int getRingLen()   const noexcept { return ringLen; }
 
 private:
-    float wrapRead (const juce::AudioBuffer<float>& buf, int len, int channel, double pos) const noexcept;
+    static float wrapRead (const juce::AudioBuffer<float>& buf, int len, int ch, double pos) noexcept
+    {
+        double p = std::fmod (pos, (double) len);
+        if (p < 0.0) p += (double) len;
+        const int i0 = (int) p;
+        const int i1 = (i0 + 1 >= len) ? 0 : i0 + 1;
+        const float f = (float) (p - (double) i0);
+        const float* d = buf.getReadPointer (ch);
+        return d[i0] + (d[i1] - d[i0]) * f;
+    }
 
-    // live ring
-    juce::AudioBuffer<float> ring;
-    int    length       = 0;
-    int    writeHead    = 0;
-    double frozenAnchor = 0.0;
-
-    // loaded sample
-    juce::AudioBuffer<float> sample;
-    int    sampleLength   = 0;
-    double samplePlayhead = 0.0;
-    double sampleFrozenAt = 0.0;
-
-    bool frozen    = false;
-    bool useSample = false;
+    juce::AudioBuffer<float> ring, frozen;
+    int ringLen = 0, frozenLen = 0, writeHead = 0;
 };

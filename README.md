@@ -61,3 +61,7 @@ Rescan in Cubase and load **GrainFreeze**.
 2. Stereo STFT (two FFTs) instead of mono-summed.
 3. Factory presets (see `PRESETS.md`) wired as `AudioProcessor` programs.
 4. Oversampling option for the reducer/robotize to tame aliasing.
+
+
+## Status
+Voice/sample section removed; single default state, no presets. Audio chain lives in `Source/dsp/FreezeCore` and is covered by an offline test (`tests/test_core.cpp`).

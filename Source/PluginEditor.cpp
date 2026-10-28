@@ -106,18 +106,12 @@ GrainFreezeAudioProcessorEditor::GrainFreezeAudioProcessorEditor (GrainFreezeAud
     canvas.addChildComponent (seqGrid);
     seqRes = std::make_unique<CycleButton> (P (pid::seqResolution), resolutionNames());
     seqLength = std::make_unique<ValueBox> (P (pid::seqLength));
-    seqOffset = std::make_unique<ValueBox> (P (pid::seqOffset));
     canvas.addChildComponent (*seqRes);
     canvas.addChildComponent (*seqLength);
-    canvas.addChildComponent (*seqOffset);
-    for (auto* l : { &seqLengthLbl, &seqOffsetLbl })
-    {
-        l->setJustificationType (Justification::centred);
-        l->setFont (Font (FontOptions (11.0f)));
-        canvas.addChildComponent (l);
-    }
+    seqLengthLbl.setJustificationType (Justification::centred);
+    seqLengthLbl.setFont (Font (FontOptions (11.0f)));
+    canvas.addChildComponent (seqLengthLbl);
     seqLengthLbl.setText ("Length", dontSendNotification);
-    seqOffsetLbl.setText ("Offset", dontSendNotification);
 
     // ---- envelope pages ----
     const auto& specs = envSpecs();
@@ -217,36 +211,6 @@ GrainFreezeAudioProcessorEditor::GrainFreezeAudioProcessorEditor (GrainFreezeAud
     resetBtn.onClick = [this] { proc.requestReset(); };
     canvas.addAndMakeVisible (ledTime);
 
-    // ---- voice ----
-    canvas.addAndMakeVisible (voice);
-    voice.onFileChosen = [this] (File f)
-    {
-        if (! proc.loadSampleFile (f))
-            NativeMessageBox::showMessageBoxAsync (MessageBoxIconType::WarningIcon,
-                                                   "GrainFreeze", "Could not load this audio file.");
-        else
-            if (auto* pr = proc.apvts.getParameter (pid::voiceEnable))
-                pr->setValueNotifyingHost (1.0f);       // use the voice right away
-    };
-    canvas.addAndMakeVisible (voiceEnable);
-    voiceEnableA = std::make_unique<APVTS::ButtonAttachment> (proc.apvts, pid::voiceEnable, voiceEnable);
-    canvas.addAndMakeVisible (stretchSync);
-    stretchSyncA = std::make_unique<APVTS::ButtonAttachment> (proc.apvts, pid::stretchSync, stretchSync);
-    canvas.addAndMakeVisible (loadBtn);
-    loadBtn.onClick = [this] { voice.browse(); };
-    voiceGainBox = std::make_unique<ValueBox> (P (pid::voiceGain));
-    stretchBox   = std::make_unique<ValueBox> (P (pid::stretchRatio));
-    canvas.addAndMakeVisible (*voiceGainBox);
-    canvas.addAndMakeVisible (*stretchBox);
-    for (auto* l : { &voiceGainLbl, &stretchLbl })
-    {
-        l->setFont (Font (FontOptions (11.0f)));
-        l->setJustificationType (Justification::centredRight);
-        canvas.addAndMakeVisible (l);
-    }
-    voiceGainLbl.setText ("Gain", dontSendNotification);
-    stretchLbl.setText ("Stretch", dontSendNotification);
-
     tabs[1]->setToggleState (true, dontSendNotification);
     selectTab (1);
 
@@ -303,18 +267,6 @@ void GrainFreezeAudioProcessorEditor::paint (Graphics& g)
     g.fillRoundedRectangle (106.0f, 52.0f, 508.0f, 240.0f, 8.0f);
     g.setColour (Colour (0xff4a505c));
     g.drawRoundedRectangle (106.5f, 52.5f, 507.0f, 239.0f, 8.0f, 1.5f);
-
-    // voice section
-    g.setColour (Colour (0xff17191d));
-    g.fillRoundedRectangle (8.0f, 480.0f, baseW - 16.0f, 236.0f, 10.0f);
-    g.setColour (Colour (0xff343843));
-    g.drawRoundedRectangle (8.5f, 480.5f, baseW - 17.0f, 235.0f, 10.0f, 1.0f);
-    g.setColour (gf::gold());
-    g.setFont (Font (FontOptions (13.0f, Font::bold)));
-    g.drawText ("VOICE", 20, 484, 80, 20, Justification::centredLeft);
-    g.setColour (gf::textDim());
-    g.setFont (Font (FontOptions (11.5f)));
-    g.drawText ("drop a sample - it is stretched to the project tempo", 78, 484, 400, 20, Justification::centredLeft);
 }
 
 void GrainFreezeAudioProcessorEditor::selectTab (int tab)
@@ -324,9 +276,7 @@ void GrainFreezeAudioProcessorEditor::selectTab (int tab)
     seqGrid.setVisible (seqPage);
     seqRes->setVisible (seqPage);
     seqLength->setVisible (seqPage);
-    seqOffset->setVisible (seqPage);
     seqLengthLbl.setVisible (seqPage);
-    seqOffsetLbl.setVisible (seqPage);
 
     for (int n = 0; n < pid::numEnvelopes; ++n)
     {
@@ -389,8 +339,6 @@ void GrainFreezeAudioProcessorEditor::layoutCanvas()
     seqRes->setBounds (rx, 88, rw, 22);
     seqLengthLbl.setBounds (rx, 116, rw, 13);
     seqLength->setBounds (rx, 130, rw, 22);
-    seqOffsetLbl.setBounds (rx, 158, rw, 13);
-    seqOffset->setBounds (rx, 172, rw, 22);
 
     for (int n = 0; n < pid::numEnvelopes; ++n)
     {
@@ -437,23 +385,14 @@ void GrainFreezeAudioProcessorEditor::layoutCanvas()
     freezeBtn.setBounds (300, 298, 120, 120);
     ledTime.setBounds (296, 424, 128, 26);
     resetBtn.setBounds (322, 454, 76, 18);
-
-    // voice section
-    voice.setBounds (18, 508, baseW - 36, 154);
-    voiceEnable.setBounds (18, 672, 72, 24);
-    stretchSync.setBounds (96, 672, 108, 24);
-    voiceGainLbl.setBounds (212, 674, 36, 20);
-    voiceGainBox->setBounds (252, 674, 84, 22);
-    stretchLbl.setBounds (346, 674, 48, 20);
-    stretchBox->setBounds (398, 674, 84, 22);
-    loadBtn.setBounds (baseW - 18 - 104, 672, 104, 24);
 }
 
 void GrainFreezeAudioProcessorEditor::timerCallback()
 {
-    meterIn.setLevels  (proc.inLevel[0].load(),  proc.inLevel[1].load());
-    meterOut.setLevels (proc.outLevel[0].load(), proc.outLevel[1].load());
+    meterIn.setLevels  (proc.getInLevel (0),  proc.getInLevel (1));
+    meterOut.setLevels (proc.getOutLevel (0), proc.getOutLevel (1));
     seqGrid.setPlayStep (proc.currentStep.load (std::memory_order_relaxed));
+    seqGrid.setActive (proc.apvts.getRawParameterValue (pid::seqOn)->load() > 0.5f);
     ledTime.set (proc.frozenUI.load() ? proc.freezeSeconds.load() : 0.0);
 
     // envelopes: activity + playheads, and re-read curves after a preset/session load
@@ -466,17 +405,4 @@ void GrainFreezeAudioProcessorEditor::timerCallback()
         if (selectedTab == n + 1) ui->curve->setPhase (proc.modulator (n).getPhase());
     }
     lastCurvesRevision = rev;
-
-    // voice
-    if (const int v = proc.getSampleVersion(); v != lastSampleVersion)
-    {
-        lastSampleVersion = v;
-        double dur = 0.0;
-        auto pk = proc.getPeaks (dur);
-        voice.setPeaks (std::move (pk), dur);
-    }
-    const bool sync = proc.apvts.getRawParameterValue (pid::stretchSync)->load() > 0.5f;
-    voice.setInfo (proc.getSampleName(), proc.getDetectedBpm(), proc.getProjectBpm(), sync, proc.frozenUI.load());
-    voice.setPlayhead (proc.samplePlayNorm.load (std::memory_order_relaxed));
-    stretchBox->setEnabled (! sync);
 }

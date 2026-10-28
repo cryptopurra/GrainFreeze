@@ -2,58 +2,56 @@
 #include <JuceHeader.h>
 
 // ---------------------------------------------------------------------------
-// StepSequencer  --  a tempo-synced multi-level gate.
-//
-// A pattern of N steps, each holding a level 0..maxLevel:
-//   0 = silent (gate closed)
-//   1 = normal gate
-//   2 = accent (full / variant)
-// (More levels can be added; the audio mapping lives in the processor.)
-//
-// The current step is derived from the host musical position and the chosen
-// resolution, so it locks to the grid. Offset shifts the phase; Reset
-// restarts the pattern on the next bar.
+// StepSequencer  --  tempo-synced two-level step pattern.
+// Every step holds 1 or 2 (the two values TimeFreeze's sequencer uses):
+//   2 = frozen step, 1 = live step.
+// The current step follows the host musical position and the resolution.
 // ---------------------------------------------------------------------------
-
 class StepSequencer
 {
 public:
-    enum Resolution { q = 0, e, eT, s, sT, ts };   // 1/4,1/8,1/8T,1/16,1/16T,1/32
+    enum Resolution { q = 0, e, eT, s, sT, ts };   // 1/4, 1/8, 1/8T, 1/16, 1/16T, 1/32
+    static constexpr int maxSteps = 32, low = 1, high = 2;
 
-    void setEnabled    (bool e)        noexcept { enabled = e; }
-    void setLength     (int n)         noexcept { length = juce::jlimit (1, 32, n); }
-    void setResolution (Resolution r)  noexcept { resolution = r; }
-    void setOffset     (float o)       noexcept { offset = o; }
+    StepSequencer()
+    {
+        for (int i = 0; i < maxSteps; ++i) pattern[(size_t) i] = ((i % 4) < 2) ? high : low;
+    }
+
+    void setEnabled (bool v) noexcept { enabled = v; }
+    void setLength (int n) noexcept { length = juce::jlimit (1, maxSteps, n); }
+    void setResolution (Resolution r) noexcept { resolution = r; }
 
     bool isEnabled() const noexcept { return enabled; }
     int  getLength() const noexcept { return length; }
 
     void setStep (int i, int level) noexcept
     {
-        if (juce::isPositiveAndBelow (i, (int) pattern.size()))
-            pattern[(size_t) i] = juce::jlimit (0, maxLevel, level);
+        if (juce::isPositiveAndBelow (i, maxSteps)) pattern[(size_t) i] = level >= high ? high : low;
     }
     int getStep (int i) const noexcept
     {
-        return juce::isPositiveAndBelow (i, (int) pattern.size()) ? pattern[(size_t) i] : 0;
+        return juce::isPositiveAndBelow (i, maxSteps) ? pattern[(size_t) i] : low;
     }
 
-    // Gate value 0..1 at a given musical position; smoothed edges applied in
-    // the processor. Returns the raw level's amplitude.
-    float gateAt (double ppqPosition) const noexcept;
+    double stepsPerQuarter() const noexcept
+    {
+        switch (resolution) { case q: return 1.0; case e: return 2.0; case eT: return 3.0;
+                              case s: return 4.0; case sT: return 6.0; case ts: return 8.0; }
+        return 4.0;
+    }
 
-    // The step index the given musical position falls on (for the UI playhead).
-    int stepIndexAt (double ppqPosition) const noexcept;
-
-    static constexpr int maxLevel = 2;
-
-    double stepsPerQuarter() const noexcept;
+    int stepIndexAt (double ppq) const noexcept
+    {
+        int idx = ((int) std::floor (ppq * stepsPerQuarter())) % length;
+        if (idx < 0) idx += length;
+        return idx;
+    }
+    int levelAt (double ppq) const noexcept { return getStep (stepIndexAt (ppq)); }
 
 private:
-
-    std::array<int, 32> pattern {};   // default all 0 (silent) until set
-    bool  enabled   = false;
-    int   length    = 16;
-    Resolution resolution = s;        // 1/16 default
-    float offset    = 0.0f;
+    std::array<int, maxSteps> pattern {};
+    bool enabled = false;
+    int length = 16;
+    Resolution resolution = s;
 };

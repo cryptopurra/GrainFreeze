@@ -14,8 +14,6 @@
 //     / StepCount, and a fixed set of per-destination depth knobs that match
 //     the knob row shown under each tab.
 //   - a multi-level step sequencer (Length / Offset / Resolution / On).
-//   - NEW: a Voice section (drop a sample, time-stretch, sync to DAW tempo,
-//     automatic BPM detection) that feeds the same engines.
 // ---------------------------------------------------------------------------
 
 enum class ModDest
@@ -36,7 +34,6 @@ namespace pid
 {
     // ---- global / source ----
     constexpr auto freeze     = "freeze";
-    constexpr auto reset      = "reset";
     constexpr auto inputGain  = "inputGain";
     constexpr auto outputGain = "outputGain";
     constexpr auto bypass     = "bypass";
@@ -65,13 +62,6 @@ namespace pid
     constexpr auto seqOn         = "seqOn";
     constexpr auto seqLength     = "seqLength";     // 1..32
     constexpr auto seqResolution = "seqResolution"; // enum
-    constexpr auto seqOffset     = "seqOffset";     // -0.5..0.5
-
-    // ---- voice section (new) ----
-    constexpr auto voiceEnable  = "voiceEnable";    // use loaded sample as source
-    constexpr auto voiceGain    = "voiceGain";      // dB
-    constexpr auto stretchSync  = "stretchSync";    // sync stretch to host tempo
-    constexpr auto stretchRatio = "stretchRatio";   // manual stretch (sync off)
 
     // ---- envelopes ----
     constexpr int numEnvelopes = 6;   // 0=Time 1=Pitch 2..5=Misc1..4

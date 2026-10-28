@@ -35,7 +35,7 @@ target_sources(GrainFreeze PRIVATE
     Source/dsp/SpectralEngine.cpp
     Source/dsp/StepModulator.cpp
     Source/dsp/StepSequencer.cpp
-    Source/dsp/TempoDetector.cpp
+    Source/dsp/FreezeCore.cpp
     Source/dsp/Reducer.cpp)
 
 target_compile_definitions(GrainFreeze PUBLIC

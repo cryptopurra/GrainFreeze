@@ -99,7 +99,6 @@ APVTS::ParameterLayout createParameterLayout()
 
     // --- global / source ---
     layout.add (std::make_unique<AudioParameterBool>  (ParameterID { pid::freeze, 1 },     "Freeze", false));
-    layout.add (std::make_unique<AudioParameterBool>  (ParameterID { pid::reset, 1 },      "Reset",  false));
     layout.add (std::make_unique<AudioParameterBool>  (ParameterID { pid::bypass, 1 },     "Bypass", false));
     layout.add (std::make_unique<AudioParameterBool>  (ParameterID { pid::limiterOn, 1 },  "Limiter", true));
     layout.add (std::make_unique<AudioParameterBool>  (ParameterID { pid::live, 1 },       "Live",    true));
@@ -128,13 +127,6 @@ APVTS::ParameterLayout createParameterLayout()
     layout.add (std::make_unique<AudioParameterBool>   (ParameterID { pid::seqOn, 1 },        "Sequencer On", false));
     layout.add (std::make_unique<AudioParameterInt>    (ParameterID { pid::seqLength, 1 },    "Seq Length", 1, 32, 16));
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { pid::seqResolution, 1 },"Seq Resolution", resolutionNames(), 3));
-    layout.add (std::make_unique<AudioParameterFloat>  (ParameterID { pid::seqOffset, 1 },    "Seq Offset", NormalisableRange<float> (-0.5f, 0.5f, 0.001f), 0.f));
-
-    // --- voice section ---
-    layout.add (std::make_unique<AudioParameterBool>  (ParameterID { pid::voiceEnable, 1 },  "Voice Source", false));
-    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { pid::voiceGain, 1 },    "Voice Gain", NormalisableRange<float> (-48.f, 6.f, 0.01f), 0.f, dbAttr()));
-    layout.add (std::make_unique<AudioParameterBool>  (ParameterID { pid::stretchSync, 1 },  "Stretch Sync", true));
-    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { pid::stretchRatio, 1 }, "Stretch", NormalisableRange<float> (0.25f, 4.f, 0.001f, 0.5f), 1.f));
 
     // --- envelopes ---
     const auto& specs = envSpecs();

@@ -1,8 +1,7 @@
 #include "SpectralEngine.h"
 
-void SpectralEngine::prepare (double sampleRate, int /*maxBlock*/)
+void SpectralEngine::prepare (double)
 {
-    sr = sampleRate;
 
     // sqrt-Hann (periodic) used for both analysis and synthesis -> Hann overall,
     // which sums to 2.0 at 75% overlap (compensated by the 0.5 below).
@@ -26,7 +25,7 @@ void SpectralEngine::reset()
     inWrite = 0; sinceHop = 0; outRead = 0; outValid = 0;
     haveHeld = false;
     scanPos = 0.0;
-    wasFrozen = false;
+    frozen = false; justFrozen = false;
 }
 
 // Expects fftData[0..2*fftSize) to already hold the windowed time-domain frame
@@ -34,14 +33,15 @@ void SpectralEngine::reset()
 // the result into the output ring.
 void SpectralEngine::analyseAndSynthesise (bool frozenMode)
 {
-    fft.perform (reinterpret_cast<juce::dsp::Complex<float>*> (fftData.data()),
-                 reinterpret_cast<juce::dsp::Complex<float>*> (fftData.data()), false);
+    // JUCE's FFT is NOT in-place safe: always use separate input / output arrays.
+    fft.perform (reinterpret_cast<const juce::dsp::Complex<float>*> (fftData.data()),
+                 reinterpret_cast<juce::dsp::Complex<float>*> (specData.data()), false);
 
     const int bins = fftSize / 2 + 1;
     for (int b = 0; b < bins; ++b)
     {
-        const float re = fftData[(size_t) b * 2];
-        const float im = fftData[(size_t) b * 2 + 1];
+        const float re = specData[(size_t) b * 2];
+        const float im = specData[(size_t) b * 2 + 1];
         const float mag = std::sqrt (re * re + im * im);
         const float phase = std::atan2 (im, re);
 
@@ -64,45 +64,31 @@ void SpectralEngine::analyseAndSynthesise (bool frozenMode)
         }
         outPhase = juce::jmap (robotize, outPhase, 0.0f);
 
-        fftData[(size_t) b * 2]     = outMag * std::cos (outPhase);
-        fftData[(size_t) b * 2 + 1] = outMag * std::sin (outPhase);
+        synData[(size_t) b * 2]     = outMag * std::cos (outPhase);
+        synData[(size_t) b * 2 + 1] = outMag * std::sin (outPhase);
     }
     haveHeld = true;
 
-    if (blur > 0.0f)
-    {
-        const auto tmp = fftData;
-        const float a = blur * 0.5f;
-        for (int b = 1; b < bins - 1; ++b)
-            for (int k = 0; k < 2; ++k)
-            {
-                const float c = tmp[(size_t) b * 2 + k];
-                const float l = tmp[(size_t) (b - 1) * 2 + k];
-                const float r = tmp[(size_t) (b + 1) * 2 + k];
-                fftData[(size_t) b * 2 + k] = (1.0f - a) * c + a * 0.5f * (l + r);
-            }
-    }
-
     // DC and Nyquist must be real.
-    fftData[1] = 0.0f;
-    fftData[(size_t) (fftSize / 2) * 2 + 1] = 0.0f;
+    synData[1] = 0.0f;
+    synData[(size_t) (fftSize / 2) * 2 + 1] = 0.0f;
 
     for (int b = 1; b < fftSize / 2; ++b)
     {
-        fftData[(size_t) (fftSize - b) * 2]     =  fftData[(size_t) b * 2];
-        fftData[(size_t) (fftSize - b) * 2 + 1] = -fftData[(size_t) b * 2 + 1];
+        synData[(size_t) (fftSize - b) * 2]     =  synData[(size_t) b * 2];
+        synData[(size_t) (fftSize - b) * 2 + 1] = -synData[(size_t) b * 2 + 1];
     }
 
     // JUCE's inverse transform is already normalised by 1/N.
-    fft.perform (reinterpret_cast<juce::dsp::Complex<float>*> (fftData.data()),
-                 reinterpret_cast<juce::dsp::Complex<float>*> (fftData.data()), true);
+    fft.perform (reinterpret_cast<const juce::dsp::Complex<float>*> (synData.data()),
+                 reinterpret_cast<juce::dsp::Complex<float>*> (timeData.data()), true);
 
     const int ringSize = (int) outRing.size();
     const int outWrite = (outRead + outValid) % ringSize;
     for (int i = 0; i < fftSize; ++i)
     {
         const int idx = (outWrite + i) % ringSize;
-        outRing[(size_t) idx] += fftData[(size_t) i * 2] * win[(size_t) i] * 0.5f;
+        outRing[(size_t) idx] += timeData[(size_t) i * 2] * win[(size_t) i] * 0.5f;
     }
     outValid = juce::jmin (ringSize, outValid + hop);
 }
@@ -112,29 +98,19 @@ void SpectralEngine::process (juce::AudioBuffer<float>& out, int numSamples)
     out.clear();
     if (capture == nullptr) return;
 
-    auto* dst  = out.getWritePointer (0);
-    auto* dstR = out.getNumChannels() > 1 ? out.getWritePointer (1) : dst;
+    float* dst  = out.getWritePointer (0);
+    float* dstR = out.getWritePointer (1);
 
-    const bool frozen = capture->isFrozen();
-    if (frozen != wasFrozen)
-    {
-        wasFrozen = frozen;
-        scanPos = 0.0;
-        haveHeld = false;
-    }
-
-    const double rateA = frozen ? 0.0 : anchorRate;
-    const double anchorEnd = capture->getAnchor();
-    const double anchorStart = anchorEnd - rateA * (double) numSamples;
-    const double windowSize = juce::jmax (sr * 1.5, (double) fftSize * 2.0);
+    const double liveStart = (double) capture->getWriteHead() - (double) numSamples;
     const int ringSize = (int) outRing.size();
+    const double span = juce::jmax (1.0, (double) capture->getFrozenLen() - (double) fftSize - 2.0);
 
     for (int s = 0; s < numSamples; ++s)
     {
         if (! frozen)
         {
-            const double pos = anchorStart + rateA * (double) s;
-            inRing[(size_t) inWrite] = 0.5f * (capture->readSample (0, pos) + capture->readSample (1, pos));
+            const double pos = liveStart + (double) s;
+            inRing[(size_t) inWrite] = 0.5f * (capture->readLive (0, pos) + capture->readLive (1, pos));
             inWrite = (inWrite + 1) % fftSize;
         }
 
@@ -153,17 +129,16 @@ void SpectralEngine::process (juce::AudioBuffer<float>& out, int numSamples)
             }
             else
             {
-                const double span = juce::jmax (1.0, windowSize - (double) fftSize);
-                const double start = anchorEnd - windowSize + std::fmod (scanPos, span);
+                if (justFrozen) { scanPos = span * 0.98; justFrozen = false; }
+                const double start = std::fmod (scanPos, span);
                 for (int i = 0; i < fftSize; ++i)
                 {
                     const double pos = start + (double) i;
-                    fftData[(size_t) i * 2]     = 0.5f * (capture->readSample (0, pos) + capture->readSample (1, pos)) * win[(size_t) i];
+                    fftData[(size_t) i * 2]     = 0.5f * (capture->readFrozen (0, pos) + capture->readFrozen (1, pos)) * win[(size_t) i];
                     fftData[(size_t) i * 2 + 1] = 0.0f;
                 }
-                scanPos += (double) scanSpeed * (double) hop;
+                scanPos += (double) speed * (double) hop;
             }
-
             analyseAndSynthesise (frozen);
         }
 
@@ -175,7 +150,6 @@ void SpectralEngine::process (juce::AudioBuffer<float>& out, int numSamples)
             outRead = (outRead + 1) % ringSize;
             --outValid;
         }
-        dst[s]  = y;
-        dstR[s] = y;
+        dst[s] = y; dstR[s] = y;
     }
 }
