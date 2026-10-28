@@ -1,6 +1,7 @@
 #pragma once
 #include <JuceHeader.h>
 #include "Parameters.h"
+#include "Presets.h"
 #include "dsp/FreezeCore.h"
 #include "dsp/StepModulator.h"
 #include "dsp/StepSequencer.h"
@@ -39,6 +40,9 @@ public:
     StepSequencer& sequencer()       noexcept { return seq; }
     StepModulator& modulator (int i) noexcept { return mods[(size_t) i]; }
     void requestReset() noexcept { resetRequested.store (true); }
+    void loadPreset (int index);
+    int  getCurrentPreset() const noexcept { return currentPreset.load(); }
+    std::atomic<int> currentPreset { 0 };
 
     // UI feedback written by the audio thread
     std::atomic<int>    currentStep { -1 };

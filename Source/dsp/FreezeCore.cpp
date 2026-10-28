@@ -1,24 +1,26 @@
 #include "FreezeCore.h"
 using namespace juce;
 
-void FreezeCore::prepare (double sampleRate, int maxBlock)
+void FreezeCore::prepare (double sampleRate, int maxBlockSize)
 {
     sr = sampleRate;
+    maxBlock = jmax (16, maxBlockSize);
     capture.prepare (sr);
     grain.prepare (sr);   grain.setCapture (&capture);
-    spectral.prepare (sr); spectral.setCapture (&capture);
+    for (auto& sp : spectral) sp.prepare();
     reducerFx.prepare (sr);
 
     grainBuf.setSize (2, maxBlock);
     specBuf.setSize  (2, maxBlock);
+    dlyBuf.setSize   (2, maxBlock);
     dryBuf.setSize   (2, maxBlock);
 
     dsp::ProcessSpec spec { sr, (uint32) maxBlock, 2 };
     hp.prepare (spec); hp.setType (dsp::StateVariableTPTFilterType::highpass);
     lp.prepare (spec); lp.setType (dsp::StateVariableTPTFilterType::lowpass);
     limiter.prepare (spec); limiter.setThreshold (-0.5f); limiter.setRelease (50.0f);
-    dryDelay.prepare (spec);
-    dryDelay.setDelay ((float) latencySamples());
+    dryDelay.prepare (spec);   dryDelay.setDelay ((float) latencySamples());
+    grainDelay.prepare (spec); grainDelay.setDelay ((float) latencySamples());
 
     wetSm.reset (sr, 0.03);
     wetSm.setCurrentAndTargetValue (1.0f);
@@ -28,16 +30,28 @@ void FreezeCore::prepare (double sampleRate, int maxBlock)
 
 void FreezeCore::process (AudioBuffer<float>& buffer, const FreezeParams& p)
 {
-    const int n = buffer.getNumSamples();
+    const int total = buffer.getNumSamples();
     if (buffer.getNumChannels() < 2)            // mono host: work on a stereo scratch copy
     {
-        AudioBuffer<float> st (2, n);
-        st.copyFrom (0, 0, buffer, 0, 0, n);
-        st.copyFrom (1, 0, buffer, 0, 0, n);
+        AudioBuffer<float> st (2, total);
+        st.copyFrom (0, 0, buffer, 0, 0, total);
+        st.copyFrom (1, 0, buffer, 0, 0, total);
         process (st, p);
-        buffer.copyFrom (0, 0, st, 0, 0, n);
+        buffer.copyFrom (0, 0, st, 0, 0, total);
         return;
     }
+    // Hosts may exceed the prepared block size: render in safe chunks.
+    for (int off = 0; off < total; off += maxBlock)
+    {
+        const int len = jmin (maxBlock, total - off);
+        AudioBuffer<float> sub (buffer.getArrayOfWritePointers(), 2, off, len);
+        processChunk (sub, p);
+    }
+}
+
+void FreezeCore::processChunk (AudioBuffer<float>& buffer, const FreezeParams& p)
+{
+    const int n = buffer.getNumSamples();
 
     // --- input gain ---
     {
@@ -64,37 +78,39 @@ void FreezeCore::process (AudioBuffer<float>& buffer, const FreezeParams& p)
     if (p.frozen && ! wasFrozen) capture.snapshot();
     wasFrozen = p.frozen;
     grain.setFrozen (p.frozen);
-    spectral.setFrozen (p.frozen);
 
-    // --- engines ---
+    // --- grain engine (live or frozen) ---
     grain.setGrainSize (p.grainSize);
     grain.setOverlap (p.overlap);
     grain.setPitch (p.pitchSemis);
     grain.setSpeed (p.speed);
     grain.process (grainBuf, n);
 
+    // --- spectral stage on the grain output; the grain path is delayed to match ---
     const bool specOn = p.specMix > 0.001f;
-    if (specOn)
-    {
-        if (! wasSpecOn) spectral.reset(), spectral.setFrozen (p.frozen);
-        spectral.setSmear (p.smear);
-        spectral.setHold (p.hold);
-        spectral.setRobotize (p.robotize);
-        spectral.setSpeed (p.speed);
-        spectral.process (specBuf, n);
-    }
-    else
-        specBuf.clear();
-    wasSpecOn = specOn;
-
     for (int c = 0; c < 2; ++c)
     {
-        float* o = buffer.getWritePointer (c);
         const float* g = grainBuf.getReadPointer (c);
+        float* d = dlyBuf.getWritePointer (c);
+        for (int i = 0; i < n; ++i)
+        {
+            grainDelay.pushSample (c, g[i]);
+            d[i] = grainDelay.popSample (c);
+        }
+        if (specOn)
+        {
+            if (! wasSpecOn) spectral[c].reset();
+            spectral[c].setSmear (p.smear);
+            spectral[c].setHold (p.hold);
+            spectral[c].setRobotize (p.robotize);
+            spectral[c].process (g, specBuf.getWritePointer (c), n);
+        }
+        float* o = buffer.getWritePointer (c);
         const float* sp = specBuf.getReadPointer (c);
         for (int i = 0; i < n; ++i)
-            o[i] = g[i] * (1.0f - p.specMix) + sp[i] * p.specMix;
+            o[i] = specOn ? d[i] * (1.0f - p.specMix) + sp[i] * p.specMix : d[i];
     }
+    wasSpecOn = specOn;
 
     // --- reducer, filters, volume ---
     reducerFx.setAmount (p.reducer);

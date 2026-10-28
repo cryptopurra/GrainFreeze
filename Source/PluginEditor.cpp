@@ -72,6 +72,11 @@ GrainFreezeAudioProcessorEditor::GrainFreezeAudioProcessorEditor (GrainFreezeAud
         setSize (baseW * z / 100, baseH * z / 100);
     };
 
+    presetBar = std::make_unique<PresetBar> (factoryPresetNames());
+    presetBar->setCurrent (proc.getCurrentPreset());
+    presetBar->onSelect = [this] (int i) { proc.loadPreset (i); presetBar->setCurrent (i); };
+    canvas.addAndMakeVisible (*presetBar);
+
     liveBtn.setComponentID ("live");
     canvas.addAndMakeVisible (liveBtn);
     liveBtn.setTooltip ("Effect on live playback (when Freeze is off)");
@@ -203,10 +208,9 @@ GrainFreezeAudioProcessorEditor::GrainFreezeAudioProcessorEditor (GrainFreezeAud
     makeCaption ("Output Gain");
 
     // ---- transport ----
-    freezeBtn.setComponentID ("freeze");
-    freezeBtn.setClickingTogglesState (true);
-    canvas.addAndMakeVisible (freezeBtn);
-    freezeA = std::make_unique<APVTS::ButtonAttachment> (proc.apvts, pid::freeze, freezeBtn);
+    freezeBtn = std::make_unique<FreezeButton> (P (pid::freeze));
+    freezeBtn->setComponentID ("freeze");
+    canvas.addAndMakeVisible (*freezeBtn);
     canvas.addAndMakeVisible (resetBtn);
     resetBtn.onClick = [this] { proc.requestReset(); };
     canvas.addAndMakeVisible (ledTime);
@@ -308,6 +312,7 @@ void GrainFreezeAudioProcessorEditor::layoutCanvas()
     using R = juce::Rectangle<int>;
 
     // top bar
+    presetBar->setBounds (196, 10, 150, 24);
     zoomBox.setBounds (baseW - 108, 10, 96, 24);
     limiterBtn.setBounds (baseW - 188, 10, 72, 24);
     bypassBtn.setBounds (baseW - 266, 10, 72, 24);
@@ -382,7 +387,7 @@ void GrainFreezeAudioProcessorEditor::layoutCanvas()
     place (pVolume,  456, 558, 352);
     place (pReducer, 456, 558, 404);
 
-    freezeBtn.setBounds (300, 298, 120, 120);
+    freezeBtn->setBounds (300, 298, 120, 120);
     ledTime.setBounds (296, 424, 128, 26);
     resetBtn.setBounds (322, 454, 76, 18);
 }
@@ -393,6 +398,7 @@ void GrainFreezeAudioProcessorEditor::timerCallback()
     meterOut.setLevels (proc.getOutLevel (0), proc.getOutLevel (1));
     seqGrid.setPlayStep (proc.currentStep.load (std::memory_order_relaxed));
     seqGrid.setActive (proc.apvts.getRawParameterValue (pid::seqOn)->load() > 0.5f);
+    presetBar->setCurrent (proc.getCurrentPreset());
     ledTime.set (proc.frozenUI.load() ? proc.freezeSeconds.load() : 0.0);
 
     // envelopes: activity + playheads, and re-read curves after a preset/session load

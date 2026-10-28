@@ -31,6 +31,10 @@ static int fails = 0;
 static void check (const char* name, bool ok, double v1, double v2 = 0)
 { std::printf ("%-52s %s  (%.4f %.4f)\n", name, ok ? "PASS" : "FAIL", v1, v2); if (! ok) ++fails; }
 
+static double goertzel (const std::vector<float>& v, size_t a, size_t b, double f)
+{ double w = 2 * M_PI * f / SR, c = 2 * std::cos (w), s1 = 0, s2 = 0; for (size_t i = a; i < b; ++i) { double s0 = v[i] + c * s1 - s2; s2 = s1; s1 = s0; }
+  return std::sqrt (s1 * s1 + s2 * s2 - c * s1 * s2) / (double) (b - a); }
+
 int main()
 {
     auto sine = [] (double f, float a) { return [=] (size_t i) { return a * (float) std::sin (2 * M_PI * f * (double) i / SR); }; };
@@ -91,6 +95,39 @@ int main()
         auto r = run (2.0, [&] (size_t) { return rnd.nextFloat() * 1.8f - 0.9f; }, [&] (int) { return p; });
         float pk = 0; for (auto v : r.out) pk = std::max (pk, std::abs (v));
         check ("limiter: peak <= 1.0", pk <= 1.0f, pk);
+    }
+    { // 9. Pitch still works with Spectral Mix at 100%
+        auto p = d; p.specMix = 1.0f; p.pitchSemis = 12.f;
+        auto r = run (3.0, sine (440, 0.5f), [&] (int) { return p; });
+        check ("pitch +12 st with spectral mix 100%: ~880 Hz", std::abs (freqOf (r.out, 66150, 132000) - 880) < 70, freqOf (r.out, 66150, 132000));
+    }
+    { // 10. Smear really smears: 440 Hz switches to 880 Hz at 1.5 s
+        auto in = [] (size_t i) { double f = i < 66150 ? 440.0 : 880.0; return 0.5f * (float) std::sin (2 * M_PI * f * (double) i / SR); };
+        auto pa = d; pa.specMix = 1.0f; pa.smear = 0.0f;
+        auto pb = pa; pb.smear = 1.0f;
+        auto ra = run (2.2, in, [&] (int) { return pa; });
+        auto rb = run (2.2, in, [&] (int) { return pb; });
+        const size_t a = 66150 + 1536 + 6000, b = a + 8192;       // shortly after the switch (+latency)
+        const double ea = goertzel (ra.out, a, b, 440), eb = goertzel (rb.out, a, b, 440);
+        check ("smear: old 440 Hz tail lingers (smear1 > 5x smear0)", eb > 5 * ea + 1e-4, ea, eb);
+    }
+    { // 11. Hold freezes the spectrum while input changes
+        auto in = [] (size_t i) { double f = i < 66150 ? 440.0 : 880.0; return 0.5f * (float) std::sin (2 * M_PI * f * (double) i / SR); };
+        auto p = d; p.specMix = 1.0f;
+        auto r = run (2.6, in, [&] (int b) { auto q = p; q.hold = (b * B >= 44100) ? 1.0f : 0.0f; return q; });
+        const size_t a = 90000, b = 110000;
+        check ("hold: spectrum stays at 440 Hz", goertzel (r.out, a, b, 440) > 3 * goertzel (r.out, a, b, 880), goertzel (r.out, a, b, 440), goertzel (r.out, a, b, 880));
+    }
+    { // 12. Host block bigger than prepared block must not break
+        FreezeCore core; core.prepare (SR, 256);
+        AudioBuffer<float> buf (2, 2048); double e = 0;
+        for (int b = 0; b < 40; ++b)
+        {
+            for (int i = 0; i < 2048; ++i) { float x = 0.5f * (float) std::sin (2 * M_PI * 440 * (double) (b * 2048 + i) / SR); buf.setSample (0, i, x); buf.setSample (1, i, x); }
+            core.process (buf, d);
+            if (b > 20) e += buf.getRMSLevel (0, 0, 2048);
+        }
+        check ("oversized host block: still audible", e / 19 > 0.2, e / 19);
     }
     std::printf (fails ? "\n%d FAILED\n" : "\nALL PASSED\n", fails);
     return fails;

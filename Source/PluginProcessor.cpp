@@ -16,6 +16,41 @@ GrainFreezeAudioProcessor::GrainFreezeAudioProcessor()
     mods[0].setCurve (decay);
 }
 
+void GrainFreezeAudioProcessor::loadPreset (int index)
+{
+    const auto& presets = factoryPresets();
+    if (! isPositiveAndBelow (index, (int) presets.size())) return;
+    const auto& pr = presets[(size_t) index];
+
+    // 1. everything back to default except the performance/global switches and gains
+    const StringArray keep { pid::freeze, pid::bypass, pid::live, pid::limiterOn, pid::inputGain, pid::outputGain };
+    for (auto* prm : getParameters())
+        if (auto* rp = dynamic_cast<RangedAudioParameter*> (prm))
+            if (! keep.contains (rp->getParameterID()))
+                rp->setValueNotifyingHost (rp->getDefaultValue());
+
+    // 2. curves + sequencer pattern back to default
+    std::vector<Point<float>> dec;
+    for (float x : { 0.0f, 0.08f, 0.18f, 0.3f, 0.45f, 0.62f, 0.8f, 1.0f })
+        dec.push_back ({ x, std::pow (1.0f - x, 2.2f) });
+    for (int n = 0; n < pid::numEnvelopes; ++n)
+        mods[(size_t) n].setCurve (n == 0 ? dec : std::vector<Point<float>> { { 0.f, 0.5f }, { 1.f, 0.5f } });
+    for (int i = 0; i < StepSequencer::maxSteps; ++i)
+        seq.setStep (i, ((i % 4) < 2) ? StepSequencer::high : StepSequencer::low);
+
+    // 3. preset content
+    for (auto& kv : pr.values)
+        if (auto* rp = apvts.getParameter (kv.first))
+            rp->setValueNotifyingHost (rp->convertTo0to1 (kv.second));
+    for (auto& e : pr.envs)
+        if (isPositiveAndBelow (e.index, pid::numEnvelopes)) mods[(size_t) e.index].setCurve (e.pts);
+    for (int i = 0; i < pr.seqPattern.length(); ++i)
+        seq.setStep (i, pr.seqPattern[i] == '2' ? StepSequencer::high : StepSequencer::low);
+
+    currentPreset.store (index);
+    curvesRevision.fetch_add (1);
+}
+
 bool GrainFreezeAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
     const auto& out = layouts.getMainOutputChannelSet();
@@ -144,13 +179,16 @@ void GrainFreezeAudioProcessor::getStateInformation (MemoryBlock& dest)
         auto* e = curves->createNewChildElement ("ENV");
         e->setAttribute ("n", n);
         String pts;
-        for (auto& p : mods[(size_t) n].getCurve())
-            pts << String (p.x, 5) << "," << String (p.y, 5) << ";";
+        const auto cv = mods[(size_t) n].getCurve();
+        const auto bd = mods[(size_t) n].getBends();
+        for (size_t i = 0; i < cv.size(); ++i)
+            pts << String (cv[i].x, 5) << "," << String (cv[i].y, 5) << "," << String (i < bd.size() ? bd[i] : 0.0f, 4) << ";";
         e->setAttribute ("pts", pts);
     }
     String lv;
     for (int i = 0; i < StepSequencer::maxSteps; ++i) lv << seq.getStep (i);
     xml->createNewChildElement ("SEQ")->setAttribute ("levels", lv);
+    xml->createNewChildElement ("PRESET")->setAttribute ("index", currentPreset.load());
     copyXmlToBinary (*xml, dest);
 }
 
@@ -166,13 +204,17 @@ void GrainFreezeAudioProcessor::setStateInformation (const void* data, int size)
             const int n = e->getIntAttribute ("n", -1);
             if (! isPositiveAndBelow (n, pid::numEnvelopes)) continue;
             std::vector<Point<float>> pts;
+            std::vector<float> bends;
             for (auto& tok : StringArray::fromTokens (e->getStringAttribute ("pts"), ";", ""))
             {
                 auto xy = StringArray::fromTokens (tok, ",", "");
-                if (xy.size() == 2) pts.push_back ({ jlimit (0.0f, 1.0f, xy[0].getFloatValue()),
-                                                      jlimit (0.0f, 1.0f, xy[1].getFloatValue()) });
+                if (xy.size() >= 2)
+                {
+                    pts.push_back ({ jlimit (0.0f, 1.0f, xy[0].getFloatValue()), jlimit (0.0f, 1.0f, xy[1].getFloatValue()) });
+                    bends.push_back (xy.size() > 2 ? jlimit (-1.0f, 1.0f, xy[2].getFloatValue()) : 0.0f);
+                }
             }
-            if (pts.size() >= 2) mods[(size_t) n].setCurve (pts);
+            if (pts.size() >= 2) mods[(size_t) n].setCurve (pts, bends);
         }
         xml->removeChildElement (curves, true);
     }
@@ -182,6 +224,11 @@ void GrainFreezeAudioProcessor::setStateInformation (const void* data, int size)
         for (int i = 0; i < jmin (StepSequencer::maxSteps, lv.length()); ++i)
             seq.setStep (i, lv[i] - '0');
         xml->removeChildElement (sq, true);
+    }
+    if (auto* pe = xml->getChildByName ("PRESET"))
+    {
+        currentPreset.store (jlimit (0, (int) factoryPresets().size() - 1, pe->getIntAttribute ("index", 0)));
+        xml->removeChildElement (pe, true);
     }
     if (xml->hasTagName (apvts.state.getType()))
         apvts.replaceState (ValueTree::fromXml (*xml));

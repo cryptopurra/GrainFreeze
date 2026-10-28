@@ -7,6 +7,8 @@
 #include "gui/ValueBox.h"
 #include "gui/CycleButton.h"
 #include "gui/Meter.h"
+#include "gui/FreezeButton.h"
+#include "gui/PresetBar.h"
 
 // ---------------------------------------------------------------------------
 // Editor: TimeFreeze-style functional layout (meters + gain knobs left/right,
@@ -70,6 +72,7 @@ private:
 
     juce::Component canvas;
     juce::ComboBox zoomBox;
+    std::unique_ptr<PresetBar> presetBar;
 
     // tabs: 0=Seq 1=Time 2=Pitch 3..6=Misc1..4
     juce::OwnedArray<juce::TextButton>   tabs;
@@ -97,9 +100,10 @@ private:
     std::unique_ptr<ValueBox> inBox, outBox;
 
     // transport
-    juce::ToggleButton freezeBtn { "FREEZE" }, bypassBtn { "Bypass" }, limiterBtn { "Limiter" }, liveBtn { "LIVE" };
+    std::unique_ptr<FreezeButton> freezeBtn;
+    juce::ToggleButton bypassBtn { "Bypass" }, limiterBtn { "Limiter" }, liveBtn { "LIVE" };
     juce::TextButton   resetBtn { "Reset" };
-    std::unique_ptr<APVTS::ButtonAttachment> freezeA, bypassA, limiterA, liveA;
+    std::unique_ptr<APVTS::ButtonAttachment> bypassA, limiterA, liveA;
 
     struct LedTime : juce::Component
     {

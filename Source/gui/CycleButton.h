@@ -3,7 +3,8 @@
 #include "GFLookAndFeel.h"
 
 // ---------------------------------------------------------------------------
-// CycleButton  --  click to step through a choice parameter (right-click = back).
+// CycleButton  --  a choice parameter shown as a dark box. Click opens a list
+// to pick the option; the mouse wheel over it steps through the options.
 // ---------------------------------------------------------------------------
 class CycleButton : public juce::Component
 {
@@ -32,20 +33,39 @@ public:
         g.drawRoundedRectangle (r, 3.0f, 1.0f);
         g.setColour (gf::gold());
         g.setFont (juce::Font (juce::FontOptions (12.5f, juce::Font::bold)));
-        g.drawText (names[idx], r, juce::Justification::centred);
+        g.drawText (names[idx], r.withTrimmedRight (12.0f), juce::Justification::centred);
+
+        juce::Path tri;                                   // small drop-down arrow
+        const float cx = r.getRight() - 9.0f, cy = r.getCentreY();
+        tri.addTriangle (cx - 3.5f, cy - 2.0f, cx + 3.5f, cy - 2.0f, cx, cy + 3.0f);
+        g.setColour (gf::goldDim());
+        g.fillPath (tri);
     }
 
     void mouseEnter (const juce::MouseEvent&) override { repaint(); }
     void mouseExit  (const juce::MouseEvent&) override { repaint(); }
 
-    void mouseUp (const juce::MouseEvent& e) override
+    void mouseDown (const juce::MouseEvent&) override
     {
-        if (! getLocalBounds().contains (e.getPosition()) || names.isEmpty()) return;
-        const int d = e.mods.isPopupMenu() ? -1 : 1;
-        att.setValueAsCompleteGesture ((float) ((idx + d + names.size()) % names.size()));
+        juce::PopupMenu m;
+        for (int i = 0; i < names.size(); ++i)
+            m.addItem (i + 1, names[i], true, i == idx);
+        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMinimumWidth (getWidth()),
+            [safe = juce::Component::SafePointer<CycleButton> (this)] (int id)
+            {
+                if (safe != nullptr && id > 0) safe->set (id - 1);
+            });
+    }
+
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& w) override
+    {
+        if (w.deltaY == 0.0f) return;
+        set (juce::jlimit (0, names.size() - 1, idx + (w.deltaY > 0 ? -1 : 1)));   // wheel up = previous option
     }
 
 private:
+    void set (int i) { if (i != idx) att.setValueAsCompleteGesture ((float) i); }
+
     juce::StringArray names;
     juce::ParameterAttachment att;
     int idx = 0;

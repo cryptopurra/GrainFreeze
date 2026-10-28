@@ -114,7 +114,7 @@ APVTS::ParameterLayout createParameterLayout()
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { pid::reducer, 1 },      "Reducer",       pct(), 1.0f, pctAttr()));
 
     // --- spectral ---
-    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { pid::specMix, 1 },   "Spectral Mix",   pct(), 0.0f, pctAttr()));
+    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { pid::specMix, 1 },   "Spectral Mix",   pct(), 1.0f, pctAttr()));
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { pid::specSmear, 1 }, "Spectral Smear", pct(), 0.0f, pctAttr()));
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { pid::specHold, 1 },  "Spectral Hold",  pct(), 0.0f, pctAttr()));
 

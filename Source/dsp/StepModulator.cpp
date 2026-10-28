@@ -2,15 +2,7 @@
 
 float StepModulator::sampleSmooth (float phase01) const noexcept
 {
-    if (curve.size() < 2) return 0.5f;
-    for (size_t i = 1; i < curve.size(); ++i)
-        if (phase01 <= curve[i].x)
-        {
-            auto& a = curve[i - 1]; auto& b = curve[i];
-            const float t = (b.x > a.x) ? (phase01 - a.x) / (b.x - a.x) : 0.0f;
-            return a.y + (b.y - a.y) * t;
-        }
-    return curve.back().y;
+    return curvemath::eval (curve, bends, phase01);
 }
 
 float StepModulator::sampleStep (float phase01) const noexcept

@@ -1,6 +1,7 @@
 #pragma once
 #include <JuceHeader.h>
 #include "../Parameters.h"
+#include "CurveMath.h"
 
 // ---------------------------------------------------------------------------
 // StepModulator  --  one tempo-synced modulation envelope.
@@ -22,10 +23,17 @@ public:
 
     bool isEnabled() const noexcept { return enabled; }
 
-    void setCurve (const std::vector<juce::Point<float>>& pts)
+    void setCurve (const std::vector<juce::Point<float>>& pts, const std::vector<float>& segmentBends = {})
     {
         const juce::SpinLock::ScopedLockType sl (lock);
         curve = pts;
+        bends = segmentBends;
+        bends.resize (pts.size() > 0 ? pts.size() - 1 : 0, 0.0f);
+    }
+    std::vector<float> getBends() const
+    {
+        const juce::SpinLock::ScopedLockType sl (lock);
+        return bends;
     }
     std::vector<juce::Point<float>> getCurve() const
     {
@@ -48,6 +56,7 @@ private:
     mutable std::atomic<float> lastPhase { 0.0f };
     mutable float lastValue = 0.5f;
     std::vector<juce::Point<float>> curve { {0.f, 0.5f}, {1.f, 0.5f} };
+    std::vector<float> bends { 0.0f };
     EnvMode  mode     = EnvMode::normal;
     LoopMode loopMode = LoopMode::loop;
     double   bars     = 2.0;

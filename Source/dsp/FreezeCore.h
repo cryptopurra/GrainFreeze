@@ -26,7 +26,7 @@ class FreezeCore
 {
 public:
     void prepare (double sampleRate, int maxBlock);
-    void restartScan() { grain.restartScan(); spectral.restartScan(); }
+    void restartScan() { grain.restartScan(); }
     void process (juce::AudioBuffer<float>& buffer, const FreezeParams& p);
 
     static constexpr int latencySamples() noexcept { return SpectralEngine::latencySamples(); }
@@ -37,13 +37,16 @@ private:
     double sr = 44100.0;
     CaptureBuffer  capture;
     GrainEngine    grain;
-    SpectralEngine spectral;
+    SpectralEngine spectral[2];
     Reducer        reducerFx;
 
-    juce::AudioBuffer<float> grainBuf, specBuf, dryBuf;
+    void processChunk (juce::AudioBuffer<float>& buffer, const FreezeParams& p);
+
+    int maxBlock = 512;
+    juce::AudioBuffer<float> grainBuf, specBuf, dlyBuf, dryBuf;
     juce::dsp::StateVariableTPTFilter<float> hp, lp;
     juce::dsp::Limiter<float> limiter;
-    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> dryDelay { 8192 };
+    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> dryDelay { 8192 }, grainDelay { 8192 };
     juce::SmoothedValue<float> wetSm;
     float lastIn = 1.f, lastOut = 1.f, lastVol = 1.f;
     bool wasFrozen = false, wasSpecOn = false;

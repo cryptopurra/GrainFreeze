@@ -30,6 +30,7 @@ target_sources(GrainFreeze PRIVATE
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp
     Source/Parameters.cpp
+    Source/Presets.cpp
     Source/dsp/CaptureBuffer.cpp
     Source/dsp/GrainEngine.cpp
     Source/dsp/SpectralEngine.cpp
