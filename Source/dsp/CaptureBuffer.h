@@ -24,7 +24,7 @@ public:
     void reset()
     {
         ring.clear(); frozen.clear();
-        writeHead = 0;
+        writeHead = 0; recorded = 0; frozenValid = frozenLen;
     }
 
     void writeBlock (const juce::AudioBuffer<float>& in)
@@ -43,17 +43,21 @@ public:
             }
         }
         writeHead = (writeHead + n) % ringLen;
+        recorded = juce::jmin (ringLen, recorded + n);
     }
 
-    // Copy the most recent frozenLen samples into the snapshot (oldest first).
+    // Copy the most recent (up to frozenLen) samples into the snapshot, oldest first.
+    // Only audio that was really recorded counts, so freezing right at the start
+    // of a playback never scans through empty silence.
     void snapshot()
     {
+        frozenValid = juce::jlimit (64, frozenLen, recorded);
         for (int c = 0; c < 2; ++c)
         {
             const float* src = ring.getReadPointer (c);
             float* dst = frozen.getWritePointer (c);
-            int r = ((writeHead - frozenLen) % ringLen + ringLen) % ringLen;
-            for (int i = 0; i < frozenLen; ++i)
+            int r = ((writeHead - frozenValid) % ringLen + ringLen) % ringLen;
+            for (int i = 0; i < frozenValid; ++i)
             {
                 dst[i] = src[r];
                 if (++r >= ringLen) r = 0;
@@ -62,10 +66,10 @@ public:
     }
 
     float readLive (int ch, double pos) const noexcept   { return wrapRead (ring, ringLen, ch, pos); }
-    float readFrozen (int ch, double pos) const noexcept { return wrapRead (frozen, frozenLen, ch, pos); }
+    float readFrozen (int ch, double pos) const noexcept { return wrapRead (frozen, frozenValid, ch, pos); }
 
     int getWriteHead() const noexcept { return writeHead; }
-    int getFrozenLen() const noexcept { return frozenLen; }
+    int getFrozenLen() const noexcept { return frozenValid; }
     int getRingLen()   const noexcept { return ringLen; }
 
 private:
@@ -81,5 +85,5 @@ private:
     }
 
     juce::AudioBuffer<float> ring, frozen;
-    int ringLen = 0, frozenLen = 0, writeHead = 0;
+    int ringLen = 0, frozenLen = 0, frozenValid = 0, writeHead = 0, recorded = 0;
 };

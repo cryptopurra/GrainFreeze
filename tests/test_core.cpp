@@ -52,6 +52,12 @@ int main()
         const float ri = rms (r.in, 44100, 88000), ro = rms (r.out, 44100, 88000);
         check ("live off: passthrough level == input", std::abs (ro / ri - 1.0) < 0.02, ro / ri);
     }
+    { // 13. Freeze very early (0.15 s after start) still sustains a tone
+        auto in = [] (size_t i) { return i < 6615 ? 0.5f * (float) std::sin (2 * M_PI * 440 * (double) i / SR) : 0.0f; };
+        auto r = run (3.0, in, [&] (int b) { auto p = d; p.frozen = (b * B >= 6615); return p; });
+        const float rf = rms (r.out, 60000, 120000);
+        check ("early freeze: sustains (rms>0.1)", rf > 0.1f, rf);
+    }
     { // 3. Freeze holds the sound after the input goes silent
         auto in = [] (size_t i) { return i < 66150 ? 0.5f * (float) std::sin (2 * M_PI * 440 * (double) i / SR) : 0.0f; };
         auto r = run (4.0, in, [&] (int b) { auto p = d; p.frozen = (b * B >= 66150); return p; });
