@@ -53,13 +53,15 @@ public:
     float getOutLevel (int c) const noexcept { return core.getOutLevel (c); }
 
 private:
-    void buildParams (FreezeParams& fp, double ppq);
+    void buildParams (FreezeParams& fp, double ppq, bool frozen);
 
     FreezeCore core;
     StepSequencer seq;
     std::array<StepModulator, pid::numEnvelopes> mods;
     std::atomic<bool> resetRequested { false };
     double sampleRate = 44100.0;
+    double internalPpq = 0.0, freezeStartPpq = 0.0;   // fallback clock when the host gives no running position
+    bool   wasFrozenProc = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GrainFreezeAudioProcessor)
 };

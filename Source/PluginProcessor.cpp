@@ -65,7 +65,7 @@ void GrainFreezeAudioProcessor::prepareToPlay (double sr, int maxBlock)
     setLatencySamples (FreezeCore::latencySamples());
 }
 
-void GrainFreezeAudioProcessor::buildParams (FreezeParams& fp, double ppq)
+void GrainFreezeAudioProcessor::buildParams (FreezeParams& fp, double ppq, bool frozen)
 {
     auto get = [this] (const char* id) { return apvts.getRawParameterValue (id)->load(); };
 
@@ -88,12 +88,16 @@ void GrainFreezeAudioProcessor::buildParams (FreezeParams& fp, double ppq)
         m.setEnabled (en);
         if (! en) continue;
         m.setMode     ((EnvMode)  (int) get (pid::envField (n, "mode").toRawUTF8()));
-        m.setLoopMode ((LoopMode) (int) get (pid::envField (n, "loop").toRawUTF8()));
+        const auto lm = (LoopMode) (int) get (pid::envField (n, "loop").toRawUTF8());
+        m.setLoopMode (lm);
         m.setSteps    ((int) get (pid::envField (n, "steps").toRawUTF8()));
         const double barsVals[] = { 0.5, 1, 2, 4, 8, 16 };
         m.setBars (barsVals[jlimit (0, 5, (int) get (pid::envField (n, "bars").toRawUTF8()))]);
 
-        const float y = m.evaluate01 (ppq);          // 0..1 curve value
+        // One-shot envelopes run once from the moment Freeze engages (idle at the start before that);
+        // Loop / Ping-Pong stay locked to the bar grid.
+        const double envPpq = (lm == LoopMode::oneShot) ? (frozen ? juce::jmax (0.0, ppq - freezeStartPpq) : 0.0) : ppq;
+        const float y = m.evaluate01 (envPpq);       // 0..1 curve value
         const float bi = y * 2.0f - 1.0f;            // -1..1
         for (auto d : specs[(size_t) n].dests)
         {
@@ -137,27 +141,38 @@ void GrainFreezeAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBu
 
     if (get (pid::bypass) > 0.5f) return;
 
-    double ppq = 0.0;
-    bool havePpq = false;
+    double ppq = 0.0, bpm = 120.0;
+    bool havePpq = false, playing = false;
     if (auto* ph = getPlayHead())
         if (auto pos = ph->getPosition())
+        {
+            playing = pos->getIsPlaying();
+            if (auto b = pos->getBpm()) bpm = *b;
             if (auto p = pos->getPpqPosition()) { ppq = *p; havePpq = true; }
+        }
 
-    FreezeParams fp;
-    buildParams (fp, ppq);
+    // Host position is used when the transport is running; otherwise an internal clock keeps envelopes moving.
+    const bool hostClock = havePpq && playing;
+    if (! hostClock) { internalPpq += (double) n / sampleRate * bpm / 60.0; ppq = internalPpq; }
+    else internalPpq = ppq;
 
-    // Freeze: the button, or (when the sequencer is on) the pattern: step 2 = frozen, step 1 = live.
     seq.setEnabled    (get (pid::seqOn) > 0.5f);
     seq.setLength     ((int) get (pid::seqLength));
     seq.setResolution ((StepSequencer::Resolution) (int) get (pid::seqResolution));
     bool frozen = get (pid::freeze) > 0.5f;
-    if (seq.isEnabled() && havePpq)
+    if (seq.isEnabled() && hostClock)
     {
         frozen = seq.levelAt (ppq) == StepSequencer::high;
         currentStep.store (seq.stepIndexAt (ppq), std::memory_order_relaxed);
     }
     else
         currentStep.store (-1, std::memory_order_relaxed);
+
+    if (frozen && ! wasFrozenProc) freezeStartPpq = ppq;     // one-shot envelopes restart here
+    wasFrozenProc = frozen;
+
+    FreezeParams fp;
+    buildParams (fp, ppq, frozen);
     fp.frozen = frozen;
 
     if (resetRequested.exchange (false)) { core.restartScan(); freezeSeconds.store (0.0); }
